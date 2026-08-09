@@ -1,0 +1,60 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.iaassistente.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.iaassistente.app"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.11.0'
+    implementation 'com.google.mlkit:text-recognition:16.0.0'
+}
+
+def generatedAssetsDir = file("src/main/assets")
+
+tasks.register('copyWebAssets', Copy) {
+    from '../../templates/index.html'
+    from('../../static/css') { into 'css' }
+    from('../../static/js') { into 'js' }
+    into generatedAssetsDir
+}
+
+tasks.register('generateConfig') {
+    def key = System.getenv('GROQ_API_KEY') ?: 'CHAVE_NAO_CONFIGURADA'
+    def model = System.getenv('GROQ_MODEL') ?: 'llama-3.3-70b-versatile'
+    doLast {
+        generatedAssetsDir.mkdirs()
+        def cfg = new groovy.json.JsonBuilder([
+                native: true,
+                apiKey: key,
+                model : model,
+        ]).toPrettyString()
+        new File(generatedAssetsDir, 'config.json').text = cfg
+    }
+}
+
+tasks.named('preBuild') {
+    dependsOn 'copyWebAssets', 'generateConfig'
+}

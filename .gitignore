@@ -174,3 +174,16 @@
 *.lz
 *.lzma
 *.iso
+
+# Android / Gradle
+**/.gradle/
+**/local.properties
+**/*.apk
+**/*.aab
+**/android/app/src/main/assets/
+
+# Exceções: arquivos do Gradle wrapper precisam ser versionados
+!android/gradlew
+!android/gradlew.bat
+!android/gradle/wrapper/
+!android/gradle/wrapper/gradle-wrapper.jar

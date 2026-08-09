@@ -20,6 +20,37 @@
   let currentAssistant = null; // { row, bubble, raw }
   let streamAbort = null;
 
+  /* ---------------- Native (APK Android) vs Web (Flask) ---------------- */
+  const IS_NATIVE = !!window.AndroidBridge;
+  let NATIVE_CONFIG = { apiKey: "", model: "llama-3.3-70b-versatile" };
+
+  if (IS_NATIVE) {
+    fetch("config.json")
+      .then((r) => r.json())
+      .then((c) => { NATIVE_CONFIG = c; })
+      .catch(() => {});
+    voiceSelect.style.display = "none";
+  }
+
+  function nativeGroqMessages(text, image, ocrText) {
+    const msgs = [
+      {
+        role: "system",
+        content:
+          "Você é um assistente pessoal inteligente, amigável e preciso. " +
+          "Responda SEMPRE em português do Brasil, de forma clara e objetiva. " +
+          "Quando o usuário anexar uma imagem, o texto extraído dela via OCR será " +
+          "fornecido no contexto — use-o para responder perguntas sobre o conteúdo. " +
+          "Formate respostas com Markdown quando fizer sentido.",
+      },
+      ...history,
+    ];
+    let content = text || "Analise o conteúdo desta imagem e descreva o que você enxerga.";
+    if (ocrText) content += "\n\nTexto extraído da imagem (OCR):\n" + ocrText;
+    msgs.push({ role: "user", content });
+    return msgs;
+  }
+
   /* ---------------- Markdown ---------------- */
   function escapeHtml(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -45,6 +76,35 @@
   let ttsSpeaking = false;
   let currentUtterance = null;
 
+  function ttsSpeak(text) {
+    if (!ttsEnabled) return;
+    if (!text.trim()) return;
+    if (IS_NATIVE) {
+      window.AndroidBridge.speak(text);
+      return;
+    }
+    if (!window.speechSynthesis) return;
+    ttsQueue.push(text);
+    processTtsQueue();
+  }
+  function ttsStopAll() {
+    ttsQueue = [];
+    ttsSpeaking = false;
+    currentUtterance = null;
+    if (IS_NATIVE) {
+      window.AndroidBridge.stopSpeak();
+      return;
+    }
+    if (window.speechSynthesis) speechSynthesis.cancel();
+  }
+  function ttsApplyRate(rate) {
+    if (IS_NATIVE) {
+      window.AndroidBridge.setRate(rate);
+      return;
+    }
+    if (window.speechSynthesis) speechSynthesis.cancel();
+  }
+
   function loadVoices() {
     const voices = window.speechSynthesis ? speechSynthesis.getVoices() : [];
     const ptVoices = voices.filter((v) => /pt/i.test(v.lang));
@@ -66,7 +126,7 @@
       voiceSelect.value = prev;
     }
   }
-  if (window.speechSynthesis) {
+  if (!IS_NATIVE && window.speechSynthesis) {
     loadVoices();
     speechSynthesis.onvoiceschanged = loadVoices;
   }
@@ -95,24 +155,13 @@
     currentUtterance = u;
     speechSynthesis.speak(u);
   }
-  function ttsSpeak(text) {
-    if (!ttsEnabled || !window.speechSynthesis) return;
-    ttsQueue.push(text);
-    processTtsQueue();
-  }
-  function ttsStopAll() {
-    ttsQueue = [];
-    if (window.speechSynthesis && currentUtterance) {
-      speechSynthesis.cancel();
-      currentUtterance = null;
-    }
-    ttsSpeaking = false;
-  }
 
   ttsToggle.addEventListener("change", () => {
     ttsEnabled = ttsToggle.checked;
     if (!ttsEnabled) ttsStopAll();
   });
+
+  rateSelect.addEventListener("change", () => ttsApplyRate(parseFloat(rateSelect.value)));
 
   /* Sentence buffer -> speak complete sentences while streaming */
   const sentenceBuffer = { text: "" };
@@ -186,6 +235,13 @@
   }
 
   /* ---------------- Image attach ---------------- */
+  let nativeOcrResult = "";
+  let nativeOcrPending = false;
+  window.onOcrResult = (token, text) => {
+    nativeOcrResult = text || "";
+    nativeOcrPending = false;
+  };
+
   attachBtn.addEventListener("click", () => fileInput.click());
 
   fileInput.addEventListener("change", () => {
@@ -195,6 +251,12 @@
     reader.onload = (e) => {
       attachedImage = { dataUrl: e.target.result, name: file.name };
       renderImagePreview();
+      if (IS_NATIVE) {
+        nativeOcrResult = "";
+        nativeOcrPending = true;
+        const token = "ocr-" + Math.random().toString(36).slice(2);
+        window.AndroidBridge.ocrBase64(attachedImage.dataUrl, token);
+      }
     };
     reader.readAsDataURL(file);
     fileInput.value = "";
@@ -215,7 +277,7 @@
     previewEl.appendChild(wrap);
   }
 
-  /* ---------------- Voice input (Web Speech Recognition) ---------------- */
+  /* ---------------- Voice input (Web Speech Recognition / bridge nativo) ---------------- */
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let recorder = null;
   let recording = false;
@@ -226,8 +288,29 @@
     micBtn.title = state ? "Parar ditado" : "Falar (ditado por voz)";
   }
 
+  window.onVoiceResult = (text) => {
+    setRecording(false);
+    if (text) {
+      inputEl.value = text;
+      autoResize();
+      updateSendBtn();
+    }
+  };
+  window.onVoiceError = (msg) => {
+    setRecording(false);
+    alert("Erro no microfone: " + msg);
+  };
+
   micBtn.addEventListener("click", () => {
-    if (recording) { if (recorder) recorder.stop(); return; }
+    if (recording) {
+      if (recorder) recorder.stop();
+      return;
+    }
+    if (IS_NATIVE) {
+      window.AndroidBridge.startRecognition();
+      setRecording(true);
+      return;
+    }
     if (!SR) {
       alert("Reconhecimento de voz não suportado neste navegador. Use o Chrome no Android ou no desktop.");
       return;
@@ -289,6 +372,45 @@
     autoResize();
   }
 
+  /* Aplica um trecho de texto na bolha e narra (comum aos dois modos) */
+  function applyDelta(assistant, content) {
+    assistant.raw += content;
+    setBubbleHTML(assistant, assistant.raw);
+    if (assistant.ttsOn) {
+      sentenceBuffer.text += content;
+      flushSentences();
+    }
+  }
+
+  /* Lê o corpo SSE (aceita tanto /api/chat quanto a API da Groq) */
+  async function consumeStream(body, onLine, onDone) {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const chunks = buf.split("\n\n");
+      buf = chunks.pop();
+      for (const chunk of chunks) {
+        for (const line of chunk.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const raw = trimmed.slice(5).trim();
+          if (raw === "[DONE]") continue;
+          if (raw) onLine(raw);
+        }
+      }
+    }
+    const trimmed = buf.trim();
+    if (trimmed.startsWith("data:")) {
+      const raw = trimmed.slice(5).trim();
+      if (raw && raw !== "[DONE]") onLine(raw);
+    }
+    onDone();
+  }
+
   async function send() {
     const text = inputEl.value.trim();
     const image = attachedImage;
@@ -314,48 +436,71 @@
     updateSendBtn();
 
     try {
-      const resp = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history }),
-        signal: controller.signal,
-      });
-
-      if (!resp.ok || !resp.body) {
-        throw new Error("Falha na comunicação com o servidor (HTTP " + resp.status + ")");
-      }
-
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      let done = false;
-
-      while (true) {
-        const { done: rd, value } = await reader.read();
-        if (rd) break;
-        buf += decoder.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop();
-        for (const part of parts) {
-          const trimmed = part.trim();
-          if (!trimmed.startsWith("data:")) continue;
-          let evt;
-          try { evt = JSON.parse(trimmed.slice(5).trim()); } catch { continue; }
-          if (evt.type === "delta") {
-            assistant.raw += evt.content;
-            setBubbleHTML(assistant, assistant.raw);
-            if (assistant.ttsOn) {
-              sentenceBuffer.text += evt.content;
-              flushSentences();
-            }
-          } else if (evt.type === "done") {
-            done = true;
-          } else if (evt.type === "error") {
-            assistant.bubble.classList.add("err-bubble");
-            assistant.raw += "\n\nErro: " + evt.content;
-            done = true;
+      if (IS_NATIVE) {
+        if (!NATIVE_CONFIG.apiKey || NATIVE_CONFIG.apiKey === "CHAVE_NAO_CONFIGURADA") {
+          throw new Error("APK sem chave de API. Configure o secret GROQ_API_KEY no repositório e recompile.");
+        }
+        if (nativeOcrPending) {
+          const t0 = Date.now();
+          while (nativeOcrPending && Date.now() - t0 < 20000) {
+            await new Promise((r) => setTimeout(r, 50));
           }
         }
+        const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer " + NATIVE_CONFIG.apiKey,
+          },
+          body: JSON.stringify({
+            model: NATIVE_CONFIG.model || "llama-3.3-70b-versatile",
+            messages: nativeGroqMessages(text, image, nativeOcrResult),
+            stream: true,
+            temperature: 0.7,
+            max_tokens: 2048,
+          }),
+          signal: controller.signal,
+        });
+        if (!resp.ok || !resp.body) {
+          throw new Error("Erro da API Groq (HTTP " + resp.status + ")");
+        }
+        await consumeStream(
+          resp.body,
+          (raw) => {
+            let evt;
+            try { evt = JSON.parse(raw); } catch { return; }
+            let content = null;
+            if (evt.type === "delta") content = evt.content;
+            else if (evt.choices && evt.choices[0] && evt.choices[0].delta) {
+              content = evt.choices[0].delta.content;
+            }
+            if (content) applyDelta(assistant, content);
+          },
+          () => {}
+        );
+      } else {
+        const resp = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history }),
+          signal: controller.signal,
+        });
+        if (!resp.ok || !resp.body) {
+          throw new Error("Falha na comunicação com o servidor (HTTP " + resp.status + ")");
+        }
+        await consumeStream(
+          resp.body,
+          (raw) => {
+            let evt;
+            try { evt = JSON.parse(raw); } catch { return; }
+            if (evt.type === "delta") applyDelta(assistant, evt.content);
+            else if (evt.type === "error") {
+              assistant.bubble.classList.add("err-bubble");
+              applyDelta(assistant, "\n\nErro: " + evt.content);
+            }
+          },
+          () => {}
+        );
       }
       if (sentenceBuffer.text.trim()) {
         ttsSpeak(sentenceBuffer.text.trim());
@@ -363,9 +508,6 @@
       }
       finalizeBubble(assistant);
       assistant.streaming = false;
-      if (!done && assistant.raw) {
-        // resposta final mesmo sem evento done explícito
-      }
       if (assistant.raw) history.push({ role: "assistant", content: assistant.raw });
     } catch (err) {
       if (err.name === "AbortError") {
