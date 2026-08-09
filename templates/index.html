@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#05070e">
+  <title>IA Assistente</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+          <path d="M19 11a7 7 0 0 1-14 0"/>
+          <line x1="12" y1="18" x2="12" y2="22"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <span class="brand-title">IA Assistente</span>
+        <span class="brand-sub">Groq &middot; voz nativa do aparelho</span>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="newChatBtn" class="btn-ghost" title="Novo chat">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+        <span>Novo chat</span>
+      </button>
+      <div class="tts-wrap" title="Narração por voz (TTS)">
+        <span class="tts-label">Narrar</span>
+        <label class="switch">
+          <input type="checkbox" id="ttsToggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <select id="voiceSelect" class="select" title="Voz do TTS"></select>
+      <select id="rateSelect" class="select" title="Velocidade da voz">
+        <option value="0.8">0.8x</option>
+        <option value="1" selected>1x</option>
+        <option value="1.2">1.2x</option>
+      </select>
+    </div>
+  </header>
+
+  <main id="messages" class="messages">
+    <div class="welcome" id="welcome">
+      <div class="welcome-logo">
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+          <path d="M19 11a7 7 0 0 1-14 0"/>
+          <line x1="12" y1="18" x2="12" y2="22"/>
+        </svg>
+      </div>
+      <h1>Como posso ajudar?</h1>
+      <p class="welcome-sub">Digite uma mensagem, anexe uma imagem para leitura via OCR ou use o microfone.</p>
+      <div class="suggestions" id="suggestions">
+        <button class="chip" data-q="Resuma em 3 tópicos as principais vantagens de aprender Python.">Aprender Python</button>
+        <button class="chip" data-q="Escreva uma função em Python que retorna o n-ésimo termo de Fibonacci.">Código Python</button>
+        <button class="chip" data-q="Explique o que é machine learning de forma simples.">Machine learning</button>
+        <button class="chip" data-q="Crie um roteiro de estudos de 4 semanas para front-end.">Roteiro de estudos</button>
+      </div>
+    </div>
+  </main>
+
+  <footer class="composer">
+    <div id="imagePreview" class="image-preview"></div>
+    <div class="composer-bar">
+      <button id="attachBtn" class="icon-btn" title="Anexar imagem (leitura via OCR)">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <circle cx="8.5" cy="8.5" r="1.5"/>
+          <path d="M21 15l-5-5L5 21"/>
+        </svg>
+      </button>
+      <textarea id="input" class="input" rows="1" placeholder="Digite sua mensagem..."></textarea>
+      <button id="micBtn" class="icon-btn mic" title="Falar (ditado por voz)">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="2" width="6" height="12" rx="3"/>
+          <path d="M5 10a7 7 0 0 0 14 0"/>
+          <line x1="12" y1="19" x2="12" y2="22"/>
+        </svg>
+      </button>
+      <button id="sendBtn" class="send-btn" title="Enviar">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+          <path d="M2 21l21-9L2 3v7l15 2-15 2z"/>
+        </svg>
+      </button>
+    </div>
+    <p class="composer-hint">A IA pode cometer erros. As respostas podem ser narradas com a voz nativa do aparelho.</p>
+  </footer>
+
+  <input type="file" id="fileInput" accept="image/*" hidden>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
