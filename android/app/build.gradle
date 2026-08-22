@@ -44,12 +44,16 @@ tasks.register('copyWebAssets', Copy) {
 tasks.register('generateConfig') {
     def key = System.getenv('GROQ_API_KEY') ?: 'CHAVE_NAO_CONFIGURADA'
     def model = System.getenv('GROQ_MODEL') ?: 'llama-3.3-70b-versatile'
+    def visionModel = System.getenv('GROQ_VISION_MODEL') ?: 'llama-3.2-11b-vision-preview'
+    def imageApi = System.getenv('IMAGE_API_URL') ?: 'https://image.pollinations.ai/prompt/'
     doLast {
         generatedAssetsDir.mkdirs()
         def cfg = new groovy.json.JsonBuilder([
-                native: true,
-                apiKey: key,
-                model : model,
+                native     : true,
+                apiKey     : key,
+                model      : model,
+                visionModel: visionModel,
+                imageApi   : imageApi,
         ]).toPrettyString()
         new File(generatedAssetsDir, 'config.json').text = cfg
     }

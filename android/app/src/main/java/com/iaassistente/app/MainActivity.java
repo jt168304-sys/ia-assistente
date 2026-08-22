@@ -2,12 +2,17 @@ package com.iaassistente.app;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.DownloadManager;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.speech.RecognizerIntent;
 import android.speech.tts.TextToSpeech;
 import android.webkit.JavascriptInterface;
@@ -21,13 +26,15 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 
 import com.google.mlkit.vision.common.InputImage;
-import com.google.mlkit.vision.text.Text;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Locale;
 
@@ -43,6 +50,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     private ValueCallback<Uri[]> filePathCallback;
     private String voiceLang = "pt-BR";
     private boolean ttsReady = false;
+    private String cachedConfig = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -63,6 +71,9 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         s.setAllowUniversalAccessFromFileURLs(true);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        if (Build.VERSION.SDK_INT >= 19) {
+            WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
+        }
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
@@ -71,6 +82,18 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
                     return false;
                 }
                 return true;
+            }
+
+            @Override
+            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                if (failingUrl != null && failingUrl.startsWith("file:///android_asset/index.html")) {
+                    view.loadData(
+                            "<html><body style='background:#05070e;color:#e7ecff;font-family:sans-serif;"
+                                    + "padding:40px;text-align:center'>"
+                                    + "<h2>Não foi possível carregar a interface</h2>"
+                                    + "<p style='color:#8fa0c9'>Reinstale o app ou reporte o erro.</p></body></html>",
+                            "text/html", "utf-8");
+                }
             }
         });
 
@@ -96,6 +119,14 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
 
     /* ---------------- JS bridge ---------------- */
     private class AndroidBridge {
+        @JavascriptInterface
+        public String getConfig() {
+            if (cachedConfig == null) {
+                cachedConfig = readConfigJson();
+            }
+            return cachedConfig;
+        }
+
         @JavascriptInterface
         public void speak(final String text) {
             runOnUiThread(() -> {
@@ -173,9 +204,94 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
                 }
             }).start();
         }
+
+        @JavascriptInterface
+        public void saveFile(final String filename, final String content) {
+            new Thread(() -> {
+                String path = saveTextFile(filename, content);
+                runOnUiThread(() -> {
+                    if (path != null) {
+                        Toast.makeText(MainActivity.this, "Arquivo salvo: " + path, Toast.LENGTH_LONG).show();
+                    } else {
+                        Toast.makeText(MainActivity.this, "Falha ao salvar arquivo", Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }).start();
+        }
+
+        @JavascriptInterface
+        public void downloadImage(final String url, final String filename) {
+            runOnUiThread(() -> {
+                try {
+                    DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
+                    req.setTitle(filename != null ? filename : "imagem.jpg");
+                    req.setDescription("Baixando imagem gerada");
+                    req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                    req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename != null ? filename : "imagem.jpg");
+                    req.allowScanningByMediaScanner();
+                    DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+                    dm.enqueue(req);
+                    Toast.makeText(MainActivity.this, "Baixando para Downloads...", Toast.LENGTH_SHORT).show();
+                } catch (Exception e) {
+                    Toast.makeText(MainActivity.this, "Falha ao baixar imagem", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
     }
 
     /* ---------------- helpers ---------------- */
+    private String readConfigJson() {
+        try {
+            InputStream is = getAssets().open("config.json");
+            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = is.read(buf)) != -1) {
+                bos.write(buf, 0, n);
+            }
+            is.close();
+            return bos.toString("UTF-8");
+        } catch (Exception e) {
+            return "{}";
+        }
+    }
+
+    private String saveTextFile(String filename, String content) {
+        String safeName = sanitizeFilename(filename);
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                android.content.ContentValues values = new android.content.ContentValues();
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, safeName);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+                values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/IAAssistente");
+                Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (uri == null) return null;
+                try (FileOutputStream fos = (FileOutputStream) getContentResolver().openOutputStream(uri)) {
+                    if (fos != null) fos.write(content.getBytes("UTF-8"));
+                }
+                return "Downloads/IAAssistente/" + safeName;
+            } else {
+                File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "IAAssistente");
+                if (!dir.exists()) dir.mkdirs();
+                File f = new File(dir, safeName);
+                try (FileOutputStream fos = new FileOutputStream(f)) {
+                    fos.write(content.getBytes("UTF-8"));
+                }
+                return f.getAbsolutePath();
+            }
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String sanitizeFilename(String name) {
+        if (name == null) return "arquivo.txt";
+        String safe = name.replaceAll("[^A-Za-z0-9._-]", "_");
+        if (safe.length() > 80) safe = safe.substring(safe.length() - 80);
+        if (safe.isEmpty()) safe = "arquivo.txt";
+        return safe;
+    }
+
     private void launchRecognition() {
         Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);

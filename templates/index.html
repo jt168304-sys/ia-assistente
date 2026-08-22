@@ -5,8 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#05070e">
   <title>IA Assistente</title>
-  <link rel="stylesheet" href="/static/css/style.css">
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 
@@ -21,7 +20,7 @@
       </div>
       <div class="brand-text">
         <span class="brand-title">IA Assistente</span>
-        <span class="brand-sub">Groq &middot; voz nativa do aparelho</span>
+        <span class="brand-sub" id="brandSub">Groq &middot; voz, imagens e arquivos</span>
       </div>
     </div>
 
@@ -58,7 +57,7 @@
         </svg>
       </div>
       <h1>Como posso ajudar?</h1>
-      <p class="welcome-sub">Digite uma mensagem, anexe uma imagem para leitura via OCR ou use o microfone.</p>
+      <p class="welcome-sub">Envie mensagens, anexe imagens para leitura inteligente, gere imagens, crie arquivos e ouça as respostas em voz alta.</p>
       <div class="suggestions" id="suggestions">
         <button class="chip" data-q="Resuma em 3 tópicos as principais vantagens de aprender Python.">Aprender Python</button>
         <button class="chip" data-q="Escreva uma função em Python que retorna o n-ésimo termo de Fibonacci.">Código Python</button>
@@ -71,7 +70,7 @@
   <footer class="composer">
     <div id="imagePreview" class="image-preview"></div>
     <div class="composer-bar">
-      <button id="attachBtn" class="icon-btn" title="Anexar imagem (leitura via OCR)">
+      <button id="attachBtn" class="icon-btn" title="Anexar imagem (leitura inteligente)">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="3" y="3" width="18" height="18" rx="2"/>
           <circle cx="8.5" cy="8.5" r="1.5"/>
@@ -79,6 +78,12 @@
         </svg>
       </button>
       <textarea id="input" class="input" rows="1" placeholder="Digite sua mensagem..."></textarea>
+      <button id="imageBtn" class="icon-btn" title="Gerar imagem (use o texto digitado como prompt)">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"/>
+          <circle cx="12" cy="12" r="4"/>
+        </svg>
+      </button>
       <button id="micBtn" class="icon-btn mic" title="Falar (ditado por voz)">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="9" y="2" width="6" height="12" rx="3"/>
@@ -92,11 +97,13 @@
         </svg>
       </button>
     </div>
-    <p class="composer-hint">A IA pode cometer erros. As respostas podem ser narradas com a voz nativa do aparelho.</p>
+    <p class="composer-hint">A IA pode cometer erros. Ative a narração para ouvir as respostas; peça para gerar imagens ou criar arquivos.</p>
   </footer>
 
   <input type="file" id="fileInput" accept="image/*" hidden>
+  <div id="toast" class="toast"></div>
 
-  <script src="/static/js/app.js"></script>
+  <script src="js/marked.min.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>
