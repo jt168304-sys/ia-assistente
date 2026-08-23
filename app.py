@@ -26,7 +26,7 @@ MAX_IMAGE_DIM = 1600
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 SYSTEM_PROMPT = (
-    "Você é um assistente pessoal inteligente, amigável e preciso, chamado IA Assistente. "
+    "Você é um assistente pessoal inteligente, amigável e preciso, chamado YuIA. "
     "Responda SEMPRE em português do Brasil, de forma clara, objetiva e completa. "
     "Você pode receber imagens: analise-as diretamente (visão) e use o texto de OCR "
     "fornecido como contexto auxiliar quando presente. "

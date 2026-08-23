@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
-        android:label="IA Assistente"
+        android:label="YuIA"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.IAAssistente"
         android:usesCleartextTraffic="true">
