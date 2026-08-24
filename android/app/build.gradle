@@ -50,6 +50,7 @@ tasks.register('generateConfig') {
     def model = System.getenv('GROQ_MODEL') ?: 'openai/gpt-oss-120b'
     def visionModel = System.getenv('GROQ_VISION_MODEL') ?: 'qwen/qwen3.6-27b'
     def imageApi = System.getenv('IMAGE_API_URL') ?: 'https://image.pollinations.ai/prompt/'
+    def searchKey = System.getenv('SEARCH_API_KEY') ?: ''
     doLast {
         generatedAssetsDir.mkdirs()
         def cfg = new groovy.json.JsonBuilder([
@@ -58,6 +59,7 @@ tasks.register('generateConfig') {
                 model      : model,
                 visionModel: visionModel,
                 imageApi   : imageApi,
+                searchKey  : searchKey,
         ]).toPrettyString()
         new File(generatedAssetsDir, 'config.json').text = cfg
     }

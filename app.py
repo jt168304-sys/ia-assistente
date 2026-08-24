@@ -27,10 +27,17 @@ client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 SYSTEM_PROMPT = (
     "Você é um assistente pessoal inteligente, amigável e preciso, chamado YuIA. "
-    "Responda SEMPRE em português do Brasil, de forma clara, objetiva e completa. "
+    "Responda SEMPRE em português do Brasil (pt-BR), de forma clara, objetiva e completa. "
+    "Regra rígida: jamais responda em inglês, espanhol ou outro idioma — escreva tudo em "
+    "português, mesmo quando o usuário escrever em outro idioma (entenda e responda em pt-BR). "
+    "Termos técnicos, nomes de bibliotecas e comandos podem ficar em inglês, mas a explicação "
+    "e o texto ao redor sempre em português. "
     "Você pode receber imagens: analise-as diretamente (visão) e use o texto de OCR "
-    "fornecido como contexto auxiliar quando presente. "
+    "fornecido como contexto auxiliar quando presente. Ao descrever uma imagem, fale sempre "
+    "em português do Brasil. "
     "Formate respostas com Markdown quando fizer sentido (listas, tabelas, trechos de código). "
+    "Prefira hífens (-) para listas em vez de asteriscos, e evite asteriscos de ênfase "
+    "(*texto*) para que a narração por voz saia limpa. "
     "Quando o usuário pedir para criar um arquivo, um script, uma planilha CSV, um JSON, "
     "um HTML ou qualquer documento, gere o conteúdo completo dentro de um bloco de código "
     "delimitado por ``` com a linguagem indicada (ex.: ```python, ```csv, ```json, ```html). "
@@ -143,12 +150,38 @@ def stream_chat(messages, model, max_tokens=4096):
     )
 
 
+def web_search(query, max_results=5):
+    """Busca na web usando DuckDuckGo (pacote 'ddgs'). Retorna string formatada ou ''."""
+    try:
+        from ddgs import DDGS
+    except Exception:
+        return ""
+
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+    except Exception:
+        return ""
+
+    if not results:
+        return ""
+
+    lines = []
+    for i, r in enumerate(results, 1):
+        title = (r.get("title") or "").strip()
+        href = (r.get("href") or "").strip()
+        body = (r.get("body") or "").strip()
+        lines.append(f"{i}. {title}\n   URL: {href}\n   {body}")
+    return "\n\n".join(lines)
+
+
 @app.post("/api/chat")
 def chat():
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
     history = data.get("history") or []
     image = data.get("image") or None
+    search = bool(data.get("search"))
 
     if not message and not image:
         return jsonify({"error": "mensagem vazia"}), 400
@@ -165,8 +198,26 @@ def chat():
 
     messages, _ = build_messages(SYSTEM_PROMPT, history, message, ocr_text, image)
 
+    if search and message:
+        context = web_search(message)
+        if context:
+            hint = (
+                "Resultados de pesquisa na web sobre a pergunta do usuário. "
+                "Use-os para dar informações atuais e cite as fontes quando útil:"
+            )
+            messages.insert(-1, {"role": "system", "content": f"{hint}\n\n{context}"})
+
     model = VISION_MODEL if (image and VISION_MODEL and VISION_MODEL.lower() != "none") else GROQ_MODEL
     return stream_chat(messages, model)
+
+
+@app.post("/api/search")
+def search():
+    data = request.get_json(silent=True) or {}
+    query = (data.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "query vazia"}), 400
+    return jsonify({"results": web_search(query)})
 
 
 def enhance_image_prompt(prompt):
@@ -175,10 +226,15 @@ def enhance_image_prompt(prompt):
         return prompt
     system = (
         "You are an expert image prompt engineer. Convert the user's request into a "
-        "detailed English prompt for an AI image generator. Be specific about subject, "
-        "style, lighting, colors and composition. Add words like 'photorealistic', "
-        "'high detail' and 'professional' when suitable. Reply ONLY with the English "
-        "prompt, without quotes or extra text."
+        "detailed English prompt for an AI image generator. "
+        "CRITICAL RULE: you must reproduce the user's scene EXACTLY. If the user says "
+        "'one banana on a wooden table', the prompt MUST contain a realistic single banana "
+        "resting on a real wooden table, with no other objects added and no fantastical "
+        "reinterpretation. Never change the subject, never add creatures, never invent "
+        "species, never replace the background object the user named. Keep every element "
+        "the user mentioned and only add generic style/quality words (photorealistic, "
+        "natural lighting, sharp focus, high detail, professional photography). "
+        "Reply ONLY with the English prompt, without quotes or extra text."
     )
     try:
         resp = client.chat.completions.create(

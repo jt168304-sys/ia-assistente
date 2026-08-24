@@ -7,6 +7,7 @@ YuIA é um assistente de IA no estilo ChatGPT, com tema escuro (preto e azul). E
 - Conversa por texto (envie com Enter ou no botão de enviar).
 - Lê imagens de forma inteligente: usa um modelo de visão da Groq para entender a imagem. Se não der, usa o OCR (Tesseract no computador, ML Kit no APK) como apoio.
 - Gera imagens: use o botão de paleta para criar uma imagem a partir do texto digitado.
+- Pesquisa na web: toque no botão de lupa para o YuIA buscar informações atuais na internet antes de responder (no computador usa o DuckDuckGo; no APK usa a API de busca da Brave).
 - Cria e baixa arquivos: quando a IA escreve código, CSV, JSON, HTML e outros, cada trecho ganha um botão "Baixar". Toda resposta pode ser baixada como arquivo .md ou copiada.
 - Narra as respostas em voz alta, usando a voz do aparelho, e mostra o texto enquanto fala.
 - Escuta pelo microfone (ditado por voz).
@@ -83,6 +84,7 @@ Acesse `http://localhost:5000`. Use o Chrome (Android ou computador) para voz e 
    - GROQ_MODEL: modelo de texto (opcional).
    - GROQ_VISION_MODEL: modelo de visão para imagens (opcional).
    - IMAGE_API_URL: serviço de geração de imagem (opcional).
+   - SEARCH_API_KEY: chave da API de busca da Brave, para pesquisar na web no APK (opcional).
 2. Abra a aba Actions, clique em Build APK e em Run workflow (ou faça um push; o build roda sozinho).
 3. Quando terminar, baixe o artefato ia-assistente-apk e instale o app-debug.apk no celular Android.
 
@@ -104,6 +106,7 @@ GROQ_API_KEY=suachave ./gradlew assembleDebug
 | GROQ_MODEL | Modelo de texto usado nas respostas | openai/gpt-oss-120b |
 | GROQ_VISION_MODEL | Modelo de visão para ler imagens (use none para desligar) | qwen/qwen3.6-27b |
 | IMAGE_API_URL | Endereço do serviço de geração de imagens | https://image.pollinations.ai/prompt/ |
+| SEARCH_API_KEY | Chave da API de busca da Brave (usada no APK; no computador a busca usa o DuckDuckGo, sem chave) | (vazia) |
 | OCR_LANG | Idiomas do Tesseract (modo computador) | por+eng |
 | PORT | Porta do servidor Flask | 5000 |
 

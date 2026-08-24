@@ -8,6 +8,7 @@
   const micBtn = document.getElementById("micBtn");
   const attachBtn = document.getElementById("attachBtn");
   const imageBtn = document.getElementById("imageBtn");
+  const searchBtn = document.getElementById("searchBtn");
   const fileInput = document.getElementById("fileInput");
   const previewEl = document.getElementById("imagePreview");
   const newChatBtn = document.getElementById("newChatBtn");
@@ -20,6 +21,7 @@
   let busy = false;
   let currentAssistant = null; // { row, bubble, raw }
   let streamAbort = null;
+  let searchEnabled = false;
 
   /* ---------------- Native (APK Android) vs Web (Flask) ---------------- */
   const IS_NATIVE = !!window.AndroidBridge;
@@ -28,6 +30,7 @@
     model: "openai/gpt-oss-120b",
     visionModel: "qwen/qwen3.6-27b",
     imageApi: "https://image.pollinations.ai/prompt/",
+    searchKey: "",
   };
 
   if (IS_NATIVE) {
@@ -78,7 +81,7 @@
   }
   function finalizeBubble(assistant) {
     if (assistant.bubble.querySelector(".caret")) {
-      assistant.bubble.innerHTML = renderMarkdown(assistant.raw);
+      assistant.bubble.innerHTML = renderMarkdown(stripThink(assistant.raw));
       sanitizeLinks(assistant.bubble);
     }
     addCodeDownloads(assistant.bubble);
@@ -91,15 +94,34 @@
   let currentUtterance = null;
   let playingMsg = null; // assistant row currently narrating
 
+  /* Remove símbolos de Markdown para que a narração saia limpa */
+  function cleanForSpeech(s) {
+    if (!s) return "";
+    let t = s;
+    t = t.replace(/```[\s\S]*?```/g, " bloco de código. ");
+    t = t.replace(/`([^`\n]*)`/g, " $1 ");
+    t = t.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
+    t = t.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+    t = t.replace(/^#{1,6}\s*/gm, "");
+    t = t.replace(/^\s*[-*+]\s+/gm, "");
+    t = t.replace(/^\s*\d+\.\s+/gm, "");
+    t = t.replace(/[*_~|]+/g, " ");
+    t = t.replace(/<[^>]+>/g, " ");
+    t = t.replace(/ +([.,;:!?])/g, "$1");
+    t = t.replace(/[ \t]{2,}/g, " ").replace(/ ?\n ?/g, " ");
+    return t.trim();
+  }
+
   function ttsSpeak(text) {
     if (!ttsEnabled) return;
-    if (!text.trim()) return;
+    const clean = cleanForSpeech(text);
+    if (!clean.trim()) return;
     if (IS_NATIVE) {
-      window.AndroidBridge.speak(text);
+      window.AndroidBridge.speak(clean);
       return;
     }
     if (!window.speechSynthesis) return;
-    ttsQueue.push(text);
+    ttsQueue.push(clean);
     processTtsQueue();
   }
   function ttsStopAll() {
@@ -322,7 +344,7 @@
       </div>`;
     messagesEl.appendChild(row);
     messagesEl.scrollTop = messagesEl.scrollHeight;
-    const assistant = { row, bubble: row.querySelector(".bubble"), raw: "", streaming: true, ttsOn: true };
+    const assistant = { row, bubble: row.querySelector(".bubble"), raw: "", displayLen: 0, streaming: true, ttsOn: true };
     return assistant;
   }
 
@@ -357,10 +379,10 @@
     });
 
     const copy = mk("Copiar", "speak-btn", icoCopy);
-    copy.addEventListener("click", () => copyText(assistant.raw));
+    copy.addEventListener("click", () => copyText(stripThink(assistant.raw)));
 
     const dl = mk("Baixar .md", "speak-btn", icoDl);
-    dl.addEventListener("click", () => downloadFile("resposta.md", assistant.raw));
+    dl.addEventListener("click", () => downloadFile("resposta.md", stripThink(assistant.raw)));
   }
 
   function addDownloadImageAction(assistant, url, name) {
@@ -525,12 +547,15 @@
   }
 
   function applyDelta(assistant, content) {
-    const clean = stripThink(content);
-    if (!clean) return;
-    assistant.raw += clean;
-    setBubbleHTML(assistant, assistant.raw);
+    if (!content) return;
+    assistant.raw += content;
+    const display = stripThink(assistant.raw);
+    const delta = display.slice(assistant.displayLen || 0);
+    assistant.displayLen = display.length;
+    if (!delta) return;
+    setBubbleHTML(assistant, display);
     if (assistant.ttsOn) {
-      sentenceBuffer.text += clean;
+      sentenceBuffer.text += delta;
       flushSentences();
     }
   }
@@ -625,10 +650,15 @@
           role: "system",
           content:
             "You are an expert image prompt engineer. Convert the user's request into a " +
-            "detailed English prompt for an AI image generator. Be specific about subject, " +
-            "style, lighting, colors and composition. Add words like 'photorealistic', " +
-            "'high detail' and 'professional' when suitable. Reply ONLY with the English " +
-            "prompt, without quotes or extra text.",
+            "detailed English prompt for an AI image generator. " +
+            "CRITICAL RULE: reproduce the user's scene EXACTLY. If the user says " +
+            "'one banana on a wooden table', the prompt MUST contain a realistic single " +
+            "banana resting on a real wooden table, with no other objects added and no " +
+            "fantastical reinterpretation. Never change the subject, never add creatures, " +
+            "never invent species, never replace the background object the user named. " +
+            "Keep every element the user mentioned and only add generic style/quality words " +
+            "(photorealistic, natural lighting, sharp focus, high detail, professional " +
+            "photography). Reply ONLY with the English prompt, without quotes or extra text.",
         },
         { role: "user", content: prompt },
       ], 300);
@@ -642,12 +672,17 @@
     const msgs = [{
       role: "system",
       content:
-        "Você é um assistente pessoal inteligente, amigável e preciso. " +
-        "Responda SEMPRE em português do Brasil, de forma clara e objetiva. " +
+        "Você é um assistente pessoal inteligente, amigável e preciso, chamado YuIA. " +
+        "Responda SEMPRE em português do Brasil (pt-BR). Regra rígida: jamais responda em " +
+        "inglês, espanhol ou outro idioma — entenda o usuário em qualquer idioma, mas escreva " +
+        "tudo em português. Termos técnicos, nomes de bibliotecas e comandos podem ficar em " +
+        "inglês, mas a explicação sempre em português. " +
         "Quando o usuário anexar uma imagem, o texto extraído dela via OCR será " +
         "fornecido no contexto — use-o para responder perguntas sobre o conteúdo. " +
-        "Formate respostas com Markdown quando fizer sentido. Quando o usuário pedir " +
-        "para criar um arquivo, entregue o conteúdo completo dentro de um bloco de código.",
+        "Formate respostas com Markdown quando fizer sentido. Prefira hífens (-) em listas " +
+        "em vez de asteriscos, e evite asteriscos de ênfase (*texto*) para que a narração " +
+        "por voz saia limpa. Quando o usuário pedir para criar um arquivo, entregue o " +
+        "conteúdo completo dentro de um bloco de código.",
     }, ...history];
     let content = text || "Analise o conteúdo desta imagem e descreva o que você enxerga.";
     if (ocrText) content += "\n\nTexto extraído da imagem (OCR):\n" + ocrText;
@@ -659,10 +694,11 @@
     const msgs = [{
       role: "system",
       content:
-        "Você é um assistente pessoal inteligente com visão. Responda SEMPRE em " +
-        "português do Brasil, analisando diretamente a imagem fornecida. " +
-        "Se houver texto OCR auxiliar, use-o para complementar a leitura. " +
-        "Formate com Markdown quando fizer sentido.",
+        "Você é um assistente pessoal inteligente com visão, chamado YuIA. Responda SEMPRE " +
+        "em português do Brasil (pt-BR), analisando diretamente a imagem fornecida. " +
+        "Jamais responda em inglês ou outro idioma; a descrição da imagem deve ser em " +
+        "português. Se houver texto OCR auxiliar, use-o para complementar a leitura. " +
+        "Formate com Markdown quando fizer sentido, evitando asteriscos de ênfase.",
     }, ...history];
     const parts = [];
     if (text) parts.push({ type: "text", text });
@@ -681,6 +717,36 @@
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "")
       .slice(0, 40) || "imagem";
+  }
+
+  async function nativeWebSearch(query) {
+    if (!NATIVE_CONFIG.searchKey) return "";
+    try {
+      const url =
+        "https://api.search.brave.com/res/v1/web/search?q=" +
+        encodeURIComponent(query) +
+        "&count=5&search_lang=pt";
+      const resp = await fetch(url, { headers: { "X-Subscription-Token": NATIVE_CONFIG.searchKey } });
+      if (!resp.ok) return "";
+      const j = await resp.json();
+      const results = (j.web && j.web.results) || [];
+      const lines = results.slice(0, 5).map(
+        (r, i) => `${i + 1}. ${r.title || ""}\n   URL: ${r.url || ""}\n   ${(r.description || "").slice(0, 220)}`
+      );
+      return lines.join("\n\n");
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function injectSearchContext(messages, context) {
+    if (!context) return messages;
+    const hint =
+      "Resultados de pesquisa na web sobre a pergunta do usuário. Use-os para dar " +
+      "informações atuais e cite as fontes quando útil:";
+    const msgs = messages.slice();
+    msgs.splice(msgs.length - 1, 0, { role: "system", content: hint + "\n\n" + context });
+    return msgs;
   }
 
   async function send() {
@@ -720,18 +786,26 @@
           }
         }
         const hasVision = !!(image && NATIVE_CONFIG.visionModel && NATIVE_CONFIG.visionModel.toLowerCase() !== "none");
+        let searchContext = "";
+        if (searchEnabled && text) {
+          if (!NATIVE_CONFIG.searchKey) {
+            toast("Pesquisa na web disponível no modo computador. No APK, adicione o secret SEARCH_API_KEY para ativá-la.");
+          } else {
+            searchContext = await nativeWebSearch(text);
+          }
+        }
         try {
           if (hasVision) {
             await groqStream(
               NATIVE_CONFIG.visionModel,
-              nativeVisionMessages(text, image.dataUrl, nativeOcrResult),
+              injectSearchContext(nativeVisionMessages(text, image.dataUrl, nativeOcrResult), searchContext),
               controller,
               (c) => applyDelta(assistant, c)
             );
           } else {
             await groqStream(
               NATIVE_CONFIG.model,
-              nativeGroqMessages(text, image, nativeOcrResult),
+              injectSearchContext(nativeGroqMessages(text, image, nativeOcrResult), searchContext),
               controller,
               (c) => applyDelta(assistant, c)
             );
@@ -739,10 +813,11 @@
         } catch (visionErr) {
           if (hasVision && nativeOcrResult) {
             assistant.raw = "";
+            assistant.displayLen = 0;
             assistant.bubble.innerHTML = `<span class="typing"><span></span><span></span><span></span></span>`;
             await groqStream(
               NATIVE_CONFIG.model,
-              nativeGroqMessages(text, image, nativeOcrResult),
+              injectSearchContext(nativeGroqMessages(text, image, nativeOcrResult), searchContext),
               controller,
               (c) => applyDelta(assistant, c)
             );
@@ -754,7 +829,7 @@
         const resp = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history }),
+          body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history, search: searchEnabled }),
           signal: controller.signal,
         });
         if (!resp.ok || !resp.body) {
@@ -781,7 +856,7 @@
       finalizeBubble(assistant);
       assistant.streaming = false;
       attachActions(assistant);
-      if (assistant.raw) history.push({ role: "assistant", content: assistant.raw });
+        if (assistant.raw) history.push({ role: "assistant", content: stripThink(assistant.raw) });
     } catch (err) {
       if (err.name === "AbortError") {
         if (sentenceBuffer.text.trim()) { ttsSpeak(sentenceBuffer.text.trim()); sentenceBuffer.text = ""; }
@@ -791,7 +866,7 @@
         }
         assistant.bubble.classList.add("err-bubble");
         if (assistant.raw) assistant.raw += "\n\n_[resposta interrompida]_";
-        if (assistant.raw) history.push({ role: "assistant", content: assistant.raw });
+      if (assistant.raw) history.push({ role: "assistant", content: stripThink(assistant.raw) });
       } else {
         assistant.bubble.innerHTML = `<span class="err-bubble">Falha ao conectar: ${escapeHtml(err.message)}</span>`;
       }
@@ -822,6 +897,15 @@
   }
 
   imageBtn.addEventListener("click", generateImage);
+
+  searchBtn.addEventListener("click", () => {
+    searchEnabled = !searchEnabled;
+    searchBtn.classList.toggle("active", searchEnabled);
+    searchBtn.title = searchEnabled
+      ? "Pesquisa na web ativada (desativar)"
+      : "Pesquisa na web desativada (ativar)";
+    toast(searchEnabled ? "Pesquisa na web ativada" : "Pesquisa na web desativada");
+  });
 
   async function generateImage() {
     if (imageBusy) return;
