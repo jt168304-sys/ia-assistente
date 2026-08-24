@@ -25,8 +25,8 @@
   const IS_NATIVE = !!window.AndroidBridge;
   let NATIVE_CONFIG = {
     apiKey: "",
-    model: "llama-3.3-70b-versatile",
-    visionModel: "llama-3.2-11b-vision-preview",
+    model: "openai/gpt-oss-120b",
+    visionModel: "qwen/qwen3.6-27b",
     imageApi: "https://image.pollinations.ai/prompt/",
   };
 
@@ -519,11 +519,18 @@
   }
 
   /* Aplica um trecho de texto na bolha e narra (comum aos dois modos) */
+  function stripThink(s) {
+    if (!s) return s;
+    return s.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  }
+
   function applyDelta(assistant, content) {
-    assistant.raw += content;
+    const clean = stripThink(content);
+    if (!clean) return;
+    assistant.raw += clean;
     setBubbleHTML(assistant, assistant.raw);
     if (assistant.ttsOn) {
-      sentenceBuffer.text += content;
+      sentenceBuffer.text += clean;
       flushSentences();
     }
   }
@@ -590,6 +597,45 @@
       const c = parseDelta(raw);
       if (c) onLine(c);
     }, () => {});
+  }
+
+  async function groqNonStream(messages, maxTokens) {
+    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + NATIVE_CONFIG.apiKey,
+      },
+      body: JSON.stringify({
+        model: NATIVE_CONFIG.model,
+        messages: messages,
+        temperature: 0.7,
+        max_tokens: maxTokens || 300,
+      }),
+    });
+    if (!resp.ok) throw new Error("Erro da API Groq (HTTP " + resp.status + ")");
+    const j = await resp.json();
+    return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
+  }
+
+  async function enhanceImagePrompt(prompt) {
+    try {
+      const out = await groqNonStream([
+        {
+          role: "system",
+          content:
+            "You are an expert image prompt engineer. Convert the user's request into a " +
+            "detailed English prompt for an AI image generator. Be specific about subject, " +
+            "style, lighting, colors and composition. Add words like 'photorealistic', " +
+            "'high detail' and 'professional' when suitable. Reply ONLY with the English " +
+            "prompt, without quotes or extra text.",
+        },
+        { role: "user", content: prompt },
+      ], 300);
+      return out.trim() || prompt;
+    } catch (e) {
+      return prompt;
+    }
   }
 
   function nativeGroqMessages(text, image, ocrText) {
@@ -795,9 +841,13 @@
     try {
       let url;
       if (IS_NATIVE) {
+        if (!NATIVE_CONFIG.apiKey || NATIVE_CONFIG.apiKey === "CHAVE_NAO_CONFIGURADA") {
+          throw new Error("APK sem chave de API. Configure o secret GROQ_API_KEY no repositório e recompile.");
+        }
+        const enhanced = await enhanceImagePrompt(prompt);
         const base = NATIVE_CONFIG.imageApi || "https://image.pollinations.ai/prompt/";
         const seed = Math.floor(Math.random() * 999999) + 1;
-        url = `${base.replace(/\/+$/, "")}/${encodeURIComponent(prompt)}?width=896&height=1024&seed=${seed}&nologo=true&model=flux`;
+        url = `${base.replace(/\/+$/, "")}/${encodeURIComponent(enhanced)}?width=896&height=1024&seed=${seed}&nologo=true&model=flux&enhance=true`;
       } else {
         const resp = await fetch("/api/image", {
           method: "POST",

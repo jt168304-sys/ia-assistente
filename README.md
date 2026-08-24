@@ -101,8 +101,8 @@ GROQ_API_KEY=suachave ./gradlew assembleDebug
 | Variável | Descrição | Padrão |
 |---|---|---|
 | GROQ_API_KEY | Chave de API da Groq (obrigatória) | — |
-| GROQ_MODEL | Modelo de texto usado nas respostas | llama-3.3-70b-versatile |
-| GROQ_VISION_MODEL | Modelo de visão para ler imagens (use none para desligar) | llama-3.2-11b-vision-preview |
+| GROQ_MODEL | Modelo de texto usado nas respostas | openai/gpt-oss-120b |
+| GROQ_VISION_MODEL | Modelo de visão para ler imagens (use none para desligar) | qwen/qwen3.6-27b |
 | IMAGE_API_URL | Endereço do serviço de geração de imagens | https://image.pollinations.ai/prompt/ |
 | OCR_LANG | Idiomas do Tesseract (modo computador) | por+eng |
 | PORT | Porta do servidor Flask | 5000 |

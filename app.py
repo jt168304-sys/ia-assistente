@@ -17,8 +17,8 @@ load_dotenv()
 app = Flask(__name__)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "llama-3.2-11b-vision-preview").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b").strip()
 IMAGE_API_URL = os.getenv("IMAGE_API_URL", "https://image.pollinations.ai/prompt/").strip()
 OCR_LANG = os.getenv("OCR_LANG", "por+eng")
 MAX_IMAGE_DIM = 1600
@@ -169,6 +169,35 @@ def chat():
     return stream_chat(messages, model)
 
 
+def enhance_image_prompt(prompt):
+    """Traduz e detalha o prompt para inglês usando a Groq, melhorando a qualidade da imagem."""
+    if not client:
+        return prompt
+    system = (
+        "You are an expert image prompt engineer. Convert the user's request into a "
+        "detailed English prompt for an AI image generator. Be specific about subject, "
+        "style, lighting, colors and composition. Add words like 'photorealistic', "
+        "'high detail' and 'professional' when suitable. Reply ONLY with the English "
+        "prompt, without quotes or extra text."
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=300,
+            temperature=0.7,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if text:
+            return text
+    except Exception:
+        pass
+    return prompt
+
+
 @app.post("/api/image")
 def image():
     data = request.get_json(silent=True) or {}
@@ -186,10 +215,11 @@ def image():
     height = max(256, min(1536, height))
     seed = random.randint(1, 999999)
 
+    enhanced = enhance_image_prompt(prompt)
     url = (
         f"{IMAGE_API_URL.rstrip('/')}/"
-        f"{urllib.parse.quote(prompt)}"
-        f"?width={width}&height={height}&seed={seed}&nologo=true&model=flux"
+        f"{urllib.parse.quote(enhanced)}"
+        f"?width={width}&height={height}&seed={seed}&nologo=true&model=flux&enhance=true"
     )
     return jsonify({"url": url, "prompt": prompt})
 
