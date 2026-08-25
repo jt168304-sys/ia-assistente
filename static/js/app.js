@@ -30,7 +30,6 @@
     model: "openai/gpt-oss-120b",
     visionModel: "qwen/qwen3.6-27b",
     imageApi: "https://image.pollinations.ai/prompt/",
-    searchKey: "",
   };
 
   if (IS_NATIVE) {
@@ -80,6 +79,10 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
   function finalizeBubble(assistant) {
+    if (assistant.renderTimer) {
+      clearTimeout(assistant.renderTimer);
+      assistant.renderTimer = null;
+    }
     if (assistant.bubble.querySelector(".caret")) {
       assistant.bubble.innerHTML = renderMarkdown(stripThink(assistant.raw));
       sanitizeLinks(assistant.bubble);
@@ -546,18 +549,26 @@
     return s.replace(/<think>[\s\S]*?<\/think>/gi, "");
   }
 
+  function scheduleRender(assistant) {
+    if (assistant.renderTimer) return;
+    assistant.renderTimer = setTimeout(() => {
+      assistant.renderTimer = null;
+      if (!assistant.raw) return;
+      setBubbleHTML(assistant, stripThink(assistant.raw));
+    }, 40);
+  }
+
   function applyDelta(assistant, content) {
     if (!content) return;
     assistant.raw += content;
     const display = stripThink(assistant.raw);
     const delta = display.slice(assistant.displayLen || 0);
     assistant.displayLen = display.length;
-    if (!delta) return;
-    setBubbleHTML(assistant, display);
-    if (assistant.ttsOn) {
+    if (delta && assistant.ttsOn) {
       sentenceBuffer.text += delta;
       flushSentences();
     }
+    scheduleRender(assistant);
   }
 
   /* Lê o corpo SSE (aceita tanto /api/chat quanto a API da Groq) */
@@ -611,7 +622,7 @@
         messages: messages,
         stream: true,
         temperature: 0.7,
-        max_tokens: 4096,
+        max_tokens: 1500,
       }),
       signal: controller.signal,
     });
@@ -677,13 +688,16 @@
         "inglês, espanhol ou outro idioma — entenda o usuário em qualquer idioma, mas escreva " +
         "tudo em português. Termos técnicos, nomes de bibliotecas e comandos podem ficar em " +
         "inglês, mas a explicação sempre em português. " +
+        "Seja CONCISO: responda de forma direta e enxuta, sem introduções longas, sem " +
+        "repetição. Prefira respostas curtas (2 a 5 parágrafos no máximo, ou listas curtas). " +
+        "Não enumere tudo o que sabe — responda apenas o que foi perguntado. " +
         "Quando o usuário anexar uma imagem, o texto extraído dela via OCR será " +
         "fornecido no contexto — use-o para responder perguntas sobre o conteúdo. " +
         "Formate respostas com Markdown quando fizer sentido. Prefira hífens (-) em listas " +
         "em vez de asteriscos, e evite asteriscos de ênfase (*texto*) para que a narração " +
         "por voz saia limpa. Quando o usuário pedir para criar um arquivo, entregue o " +
         "conteúdo completo dentro de um bloco de código.",
-    }, ...history];
+    }, ...trimHistory(history, 12)];
     let content = text || "Analise o conteúdo desta imagem e descreva o que você enxerga.";
     if (ocrText) content += "\n\nTexto extraído da imagem (OCR):\n" + ocrText;
     msgs.push({ role: "user", content });
@@ -697,9 +711,11 @@
         "Você é um assistente pessoal inteligente com visão, chamado YuIA. Responda SEMPRE " +
         "em português do Brasil (pt-BR), analisando diretamente a imagem fornecida. " +
         "Jamais responda em inglês ou outro idioma; a descrição da imagem deve ser em " +
-        "português. Se houver texto OCR auxiliar, use-o para complementar a leitura. " +
-        "Formate com Markdown quando fizer sentido, evitando asteriscos de ênfase.",
-    }, ...history];
+        "português. Seja CONCISO: descreva o essencial, sem excesso de detalhes e sem " +
+        "repetição (2 a 5 parágrafos no máximo). Se houver texto OCR auxiliar, use-o para " +
+        "complementar a leitura. Formate com Markdown quando fizer sentido, evitando " +
+        "asteriscos de ênfase.",
+    }, ...trimHistory(history, 12)];
     const parts = [];
     if (text) parts.push({ type: "text", text });
     else parts.push({ type: "text", text: "Analise esta imagem e descreva detalhadamente o que você enxerga." });
@@ -719,19 +735,17 @@
       .slice(0, 40) || "imagem";
   }
 
+  function trimHistory(arr, n) {
+    if (!arr || arr.length <= n) return arr;
+    return arr.slice(arr.length - n);
+  }
+
   async function nativeWebSearch(query) {
-    if (!NATIVE_CONFIG.searchKey) return "";
     try {
-      const url =
-        "https://api.search.brave.com/res/v1/web/search?q=" +
-        encodeURIComponent(query) +
-        "&count=5&search_lang=pt";
-      const resp = await fetch(url, { headers: { "X-Subscription-Token": NATIVE_CONFIG.searchKey } });
-      if (!resp.ok) return "";
-      const j = await resp.json();
-      const results = (j.web && j.web.results) || [];
-      const lines = results.slice(0, 5).map(
-        (r, i) => `${i + 1}. ${r.title || ""}\n   URL: ${r.url || ""}\n   ${(r.description || "").slice(0, 220)}`
+      const raw = window.AndroidBridge.webSearch(query);
+      const list = JSON.parse(raw || "[]");
+      const lines = list.slice(0, 5).map(
+        (r, i) => `${i + 1}. ${r.title || ""}\n   URL: ${r.url || ""}\n   ${(r.snippet || "").slice(0, 220)}`
       );
       return lines.join("\n\n");
     } catch (e) {
@@ -788,11 +802,7 @@
         const hasVision = !!(image && NATIVE_CONFIG.visionModel && NATIVE_CONFIG.visionModel.toLowerCase() !== "none");
         let searchContext = "";
         if (searchEnabled && text) {
-          if (!NATIVE_CONFIG.searchKey) {
-            toast("Pesquisa na web disponível no modo computador. No APK, adicione o secret SEARCH_API_KEY para ativá-la.");
-          } else {
-            searchContext = await nativeWebSearch(text);
-          }
+          searchContext = await nativeWebSearch(text);
         }
         try {
           if (hasVision) {
@@ -829,7 +839,7 @@
         const resp = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history, search: searchEnabled }),
+          body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history: trimHistory(history, 12), search: searchEnabled }),
           signal: controller.signal,
         });
         if (!resp.ok || !resp.body) {

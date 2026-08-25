@@ -32,11 +32,18 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends Activity implements TextToSpeech.OnInitListener {
 
@@ -237,6 +244,100 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
                 }
             });
         }
+
+        /* Pesquisa na web gratuita (DuckDuckGo) — sem chave e sem cartão.
+         * Retorna um array JSON: [{"title","url","snippet"}, ...] */
+        @JavascriptInterface
+        public String webSearch(final String query) {
+            if (query == null || query.trim().isEmpty()) return "[]";
+            try {
+                String html = ddgHtml(query.trim());
+                Pattern linkPat = Pattern.compile(
+                        "<a[^>]*class=\"result__a\"[^>]*href=\"([^\"]*)\"[^>]*>(.*?)</a>",
+                        Pattern.DOTALL);
+                Pattern snipPat = Pattern.compile(
+                        "<a[^>]*class=\"result__snippet\"[^>]*>(.*?)</a>",
+                        Pattern.DOTALL);
+                Matcher lm = linkPat.matcher(html);
+                Matcher sm = snipPat.matcher(html);
+                StringBuilder out = new StringBuilder("[");
+                int count = 0;
+                while (lm.find() && count < 5) {
+                    String title = stripHtml(lm.group(2));
+                    String href = decodeDdgUrl(lm.group(1));
+                    String snippet = "";
+                    if (sm.find()) snippet = stripHtml(sm.group(1));
+                    if (count > 0) out.append(",");
+                    out.append("{\"title\":").append(jsonString(title))
+                       .append(",\"url\":").append(jsonString(href))
+                       .append(",\"snippet\":").append(jsonString(snippet)).append("}");
+                    count++;
+                }
+                out.append("]");
+                return out.toString();
+            } catch (Exception e) {
+                return "[]";
+            }
+        }
+    }
+
+    /* Busca no DuckDuckGo via POST em html.duckduckgo.com/html/.
+     * Um User-Agent simples ("Mozilla/5.0") faz o DuckDuckGo devolver a
+     * versão HTML clássica, que dá para parsear sem chave de API. */
+    private String ddgHtml(String query) throws Exception {
+        String body = "q=" + URLEncoder.encode(query, "UTF-8") + "&b=&l=br-pt";
+        HttpURLConnection conn = (HttpURLConnection) new URL("https://html.duckduckgo.com/html/").openConnection();
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0");
+        conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*;q=0.8");
+        conn.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9");
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        conn.setConnectTimeout(12000);
+        conn.setReadTimeout(12000);
+        conn.getOutputStream().write(body.getBytes("UTF-8"));
+        int code = conn.getResponseCode();
+        InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int n;
+        if (is != null) {
+            while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+            is.close();
+        }
+        conn.disconnect();
+        return bos.toString("UTF-8");
+    }
+
+    private String decodeDdgUrl(String href) {
+        if (href == null) return "";
+        try {
+            if (href.contains("uddg=")) {
+                String uddg = href.substring(href.indexOf("uddg=") + 5);
+                int amp = uddg.indexOf('&');
+                if (amp >= 0) uddg = uddg.substring(0, amp);
+                return URLDecoder.decode(uddg, "UTF-8");
+            }
+            if (href.startsWith("//")) return "https:" + href;
+        } catch (Exception ignored) {
+        }
+        return href;
+    }
+
+    private String stripHtml(String s) {
+        if (s == null) return "";
+        String t = s.replaceAll("<[^>]+>", "")
+                .replace("&amp;", "&").replace("&quot;", "\"").replace("&#x27;", "'")
+                .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&nbsp;", " ").replace("&ldquo;", "\u201c").replace("&rdquo;", "\u201d");
+        return t.trim();
+    }
+
+    private String jsonString(String s) {
+        if (s == null) return "\"\"";
+        String t = s.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\n", "\\n").replace("\r", "\\r");
+        return "\"" + t + "\"";
     }
 
     /* ---------------- helpers ---------------- */

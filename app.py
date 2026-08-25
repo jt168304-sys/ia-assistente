@@ -32,6 +32,9 @@ SYSTEM_PROMPT = (
     "português, mesmo quando o usuário escrever em outro idioma (entenda e responda em pt-BR). "
     "Termos técnicos, nomes de bibliotecas e comandos podem ficar em inglês, mas a explicação "
     "e o texto ao redor sempre em português. "
+    "Seja CONCISO: responda de forma direta e enxuta, sem introduções longas, sem repetição "
+    "e sem desabafar. Prefira respostas curtas (2 a 5 parágrafos no máximo, ou listas curtas "
+    "com poucos itens). Não enumere tudo o que sabe — responda apenas o que foi perguntado. "
     "Você pode receber imagens: analise-as diretamente (visão) e use o texto de OCR "
     "fornecido como contexto auxiliar quando presente. Ao descrever uma imagem, fale sempre "
     "em português do Brasil. "
@@ -119,7 +122,7 @@ def build_messages(system_prompt, history, text, ocr_text, image_data_url):
     return messages, use_vision
 
 
-def stream_chat(messages, model, max_tokens=4096):
+def stream_chat(messages, model, max_tokens=1500):
     def generate():
         try:
             stream = client.chat.completions.create(
@@ -171,6 +174,8 @@ def web_search(query, max_results=5):
         title = (r.get("title") or "").strip()
         href = (r.get("href") or "").strip()
         body = (r.get("body") or "").strip()
+        if len(body) > 180:
+            body = body[:180].rsplit(" ", 1)[0] + "..."
         lines.append(f"{i}. {title}\n   URL: {href}\n   {body}")
     return "\n\n".join(lines)
 
