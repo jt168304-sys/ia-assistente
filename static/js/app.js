@@ -8,7 +8,6 @@
   const micBtn = document.getElementById("micBtn");
   const attachBtn = document.getElementById("attachBtn");
   const imageBtn = document.getElementById("imageBtn");
-  const searchBtn = document.getElementById("searchBtn");
   const fileInput = document.getElementById("fileInput");
   const previewEl = document.getElementById("imagePreview");
   const newChatBtn = document.getElementById("newChatBtn");
@@ -21,7 +20,6 @@
   let busy = false;
   let currentAssistant = null; // { row, bubble, raw }
   let streamAbort = null;
-  let searchEnabled = false;
 
   /* ---------------- Native (APK Android) vs Web (Flask) ---------------- */
   const IS_NATIVE = !!window.AndroidBridge;
@@ -546,7 +544,7 @@
   /* Aplica um trecho de texto na bolha e narra (comum aos dois modos) */
   function stripThink(s) {
     if (!s) return s;
-    return s.replace(/<think>[\s\S]*?<\/think>/gi, "");
+    return s.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "");
   }
 
   function scheduleRender(assistant) {
@@ -610,7 +608,14 @@
     return null;
   }
 
-  async function groqStream(model, messages, controller, onLine) {
+  function reasoningParam(model) {
+    const m = (model || "").toLowerCase();
+    if (m.indexOf("qwen") !== -1) return { reasoning_effort: "none" };
+    if (m.indexOf("gpt-oss") !== -1) return { reasoning_effort: "low" };
+    return {};
+  }
+
+  async function groqStream(model, messages, controller, onLine, maxTokens) {
     const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -622,7 +627,8 @@
         messages: messages,
         stream: true,
         temperature: 0.7,
-        max_tokens: 1500,
+        max_tokens: maxTokens || 1500,
+        ...reasoningParam(model),
       }),
       signal: controller.signal,
     });
@@ -647,6 +653,7 @@
         messages: messages,
         temperature: 0.7,
         max_tokens: maxTokens || 300,
+        ...reasoningParam(NATIVE_CONFIG.model),
       }),
     });
     if (!resp.ok) throw new Error("Erro da API Groq (HTTP " + resp.status + ")");
@@ -654,8 +661,15 @@
     return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
   }
 
-  async function enhanceImagePrompt(prompt) {
+  async function enhanceImagePrompt(prompt, context) {
     try {
+      const userContent = context
+        ? prompt +
+          "\n\nResultados de pesquisa na web sobre o assunto. Use-os APENAS se ajudarem " +
+          "a descrever o que o usuário pediu (ex.: aparência real de um personagem, objeto " +
+          "ou lugar). Ignore resultados irrelevantes:\n" +
+          context
+        : prompt;
       const out = await groqNonStream([
         {
           role: "system",
@@ -666,16 +680,31 @@
             "'one banana on a wooden table', the prompt MUST contain a realistic single " +
             "banana resting on a real wooden table, with no other objects added and no " +
             "fantastical reinterpretation. Never change the subject, never add creatures, " +
-            "never invent species, never replace the background object the user named. " +
+            "never invent species, never replace the background object the user named. If " +
+            "web reference describes a real person/character/object, use those REAL details " +
+            "(hair, clothes, colors, props) so the image looks like the actual thing. " +
             "Keep every element the user mentioned and only add generic style/quality words " +
             "(photorealistic, natural lighting, sharp focus, high detail, professional " +
             "photography). Reply ONLY with the English prompt, without quotes or extra text.",
         },
-        { role: "user", content: prompt },
-      ], 300);
+        { role: "user", content: userContent },
+      ], 400);
       return out.trim() || prompt;
     } catch (e) {
       return prompt;
+    }
+  }
+
+  function currentDateTime() {
+    try {
+      const d = new Date();
+      return (
+        "hoje é " + d.toLocaleDateString("pt-BR") +
+        " e agora são " + d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) +
+        " (horário do celular)"
+      );
+    } catch (e) {
+      return "";
     }
   }
 
@@ -691,6 +720,7 @@
         "Seja CONCISO: responda de forma direta e enxuta, sem introduções longas, sem " +
         "repetição. Prefira respostas curtas (2 a 5 parágrafos no máximo, ou listas curtas). " +
         "Não enumere tudo o que sabe — responda apenas o que foi perguntado. " +
+        currentDateTime() + ". Use isso para perguntas sobre data e hora. " +
         "Quando o usuário anexar uma imagem, o texto extraído dela via OCR será " +
         "fornecido no contexto — use-o para responder perguntas sobre o conteúdo. " +
         "Formate respostas com Markdown quando fizer sentido. Prefira hífens (-) em listas " +
@@ -712,9 +742,9 @@
         "em português do Brasil (pt-BR), analisando diretamente a imagem fornecida. " +
         "Jamais responda em inglês ou outro idioma; a descrição da imagem deve ser em " +
         "português. Seja CONCISO: descreva o essencial, sem excesso de detalhes e sem " +
-        "repetição (2 a 5 parágrafos no máximo). Se houver texto OCR auxiliar, use-o para " +
-        "complementar a leitura. Formate com Markdown quando fizer sentido, evitando " +
-        "asteriscos de ênfase.",
+        "repetição (2 a 5 parágrafos no máximo). " + currentDateTime() + ". Se houver texto " +
+        "OCR auxiliar, use-o para complementar a leitura. Formate com Markdown quando fizer " +
+        "sentido, evitando asteriscos de ênfase.",
     }, ...trimHistory(history, 12)];
     const parts = [];
     if (text) parts.push({ type: "text", text });
@@ -801,7 +831,7 @@
         }
         const hasVision = !!(image && NATIVE_CONFIG.visionModel && NATIVE_CONFIG.visionModel.toLowerCase() !== "none");
         let searchContext = "";
-        if (searchEnabled && text) {
+        if (text) {
           searchContext = await nativeWebSearch(text);
         }
         try {
@@ -839,7 +869,7 @@
         const resp = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history: trimHistory(history, 12), search: searchEnabled }),
+          body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history: trimHistory(history, 12), search: true }),
           signal: controller.signal,
         });
         if (!resp.ok || !resp.body) {
@@ -908,15 +938,6 @@
 
   imageBtn.addEventListener("click", generateImage);
 
-  searchBtn.addEventListener("click", () => {
-    searchEnabled = !searchEnabled;
-    searchBtn.classList.toggle("active", searchEnabled);
-    searchBtn.title = searchEnabled
-      ? "Pesquisa na web ativada (desativar)"
-      : "Pesquisa na web desativada (ativar)";
-    toast(searchEnabled ? "Pesquisa na web ativada" : "Pesquisa na web desativada");
-  });
-
   async function generateImage() {
     if (imageBusy) return;
     let prompt = inputEl.value.trim();
@@ -938,7 +959,8 @@
         if (!NATIVE_CONFIG.apiKey || NATIVE_CONFIG.apiKey === "CHAVE_NAO_CONFIGURADA") {
           throw new Error("APK sem chave de API. Configure o secret GROQ_API_KEY no repositório e recompile.");
         }
-        const enhanced = await enhanceImagePrompt(prompt);
+        const searchRef = await nativeWebSearch(prompt);
+        const enhanced = await enhanceImagePrompt(prompt, searchRef);
         const base = NATIVE_CONFIG.imageApi || "https://image.pollinations.ai/prompt/";
         const seed = Math.floor(Math.random() * 999999) + 1;
         url = `${base.replace(/\/+$/, "")}/${encodeURIComponent(enhanced)}?width=896&height=1024&seed=${seed}&nologo=true&model=flux&enhance=true`;

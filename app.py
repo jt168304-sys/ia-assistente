@@ -3,8 +3,10 @@ import io
 import json
 import os
 import random
+import time
 import urllib.parse
 import urllib.request
+from datetime import datetime
 
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, render_template, request, send_from_directory, stream_with_context
@@ -24,6 +26,17 @@ OCR_LANG = os.getenv("OCR_LANG", "por+eng")
 MAX_IMAGE_DIM = 1600
 
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
+
+
+def reasoning_param(model):
+    """Cada modelo da conta aceita valores diferentes de reasoning_effort.
+    qwen aceita 'none' (desliga o raciocínio); gpt-oss aceita low/medium/high."""
+    m = (model or "").lower()
+    if "qwen" in m:
+        return {"reasoning_effort": "none"}
+    if "gpt-oss" in m:
+        return {"reasoning_effort": "low"}
+    return {}
 
 SYSTEM_PROMPT = (
     "Você é um assistente pessoal inteligente, amigável e preciso, chamado YuIA. "
@@ -48,6 +61,22 @@ SYSTEM_PROMPT = (
     "códigos, planos e formatos úteis. Sempre que fizer sentido, entregue o conteúdo "
     "pronto para uso e download."
 )
+
+
+def build_system_prompt():
+    """Prompt de sistema + data e hora atuais para o YuIA responder sobre tempo."""
+    now = datetime.now()
+    try:
+        tz = time.tzname[0] or ""
+    except Exception:
+        tz = ""
+    info = (
+        f"\n\nData e hora atuais: hoje é {now.strftime('%d/%m/%Y')} e agora são "
+        f"{now.strftime('%H:%M')} (horário do servidor, fuso {tz}). "
+        "Use essa informação quando o usuário perguntar que dia é hoje, que horas são, "
+        "qual a data de um evento futuro, etc."
+    )
+    return SYSTEM_PROMPT + info
 
 
 def ocr_from_data_url(data_url):
@@ -131,6 +160,7 @@ def stream_chat(messages, model, max_tokens=1500):
                 stream=True,
                 temperature=0.7,
                 max_tokens=max_tokens,
+                **reasoning_param(model),
             )
             for chunk in stream:
                 delta = chunk.choices[0].delta.content
@@ -186,7 +216,7 @@ def chat():
     message = (data.get("message") or "").strip()
     history = data.get("history") or []
     image = data.get("image") or None
-    search = bool(data.get("search"))
+    search = data.get("search", True)
 
     if not message and not image:
         return jsonify({"error": "mensagem vazia"}), 400
@@ -201,14 +231,15 @@ def chat():
         except Exception:
             ocr_text = ""
 
-    messages, _ = build_messages(SYSTEM_PROMPT, history, message, ocr_text, image)
+    messages, _ = build_messages(build_system_prompt(), history, message, ocr_text, image)
 
     if search and message:
         context = web_search(message)
         if context:
             hint = (
                 "Resultados de pesquisa na web sobre a pergunta do usuário. "
-                "Use-os para dar informações atuais e cite as fontes quando útil:"
+                "Use-os APENAS se ajudarem a responder (dados atuais, notícias, "
+                "referências). Se forem irrelevantes, ignore-os. Cite as fontes quando útil:"
             )
             messages.insert(-1, {"role": "system", "content": f"{hint}\n\n{context}"})
 
@@ -226,9 +257,21 @@ def search():
 
 
 def enhance_image_prompt(prompt):
-    """Traduz e detalha o prompt para inglês usando a Groq, melhorando a qualidade da imagem."""
+    """Traduz e detalha o prompt para inglês usando a Groq, melhorando a qualidade da imagem.
+    Usa a busca na web como referência para descrever corretamente o assunto pedido."""
     if not client:
         return prompt
+
+    reference = web_search(prompt)
+    user_content = prompt
+    if reference:
+        user_content += (
+            "\n\nResultados de pesquisa na web sobre o assunto. Use-os APENAS se ajudarem "
+            "a descrever o que o usuário pediu (ex.: aparência real de um personagem, "
+            "objeto ou lugar). Ignore resultados irrelevantes:\n"
+            + reference
+        )
+
     system = (
         "You are an expert image prompt engineer. Convert the user's request into a "
         "detailed English prompt for an AI image generator. "
@@ -236,9 +279,11 @@ def enhance_image_prompt(prompt):
         "'one banana on a wooden table', the prompt MUST contain a realistic single banana "
         "resting on a real wooden table, with no other objects added and no fantastical "
         "reinterpretation. Never change the subject, never add creatures, never invent "
-        "species, never replace the background object the user named. Keep every element "
-        "the user mentioned and only add generic style/quality words (photorealistic, "
-        "natural lighting, sharp focus, high detail, professional photography). "
+        "species, never replace the background object the user named. If web reference "
+        "describes a real person/character/object, use those REAL details (hair, clothes, "
+        "colors, props) so the image looks like the actual thing. Keep every element the "
+        "user mentioned and only add generic style/quality words (photorealistic, natural "
+        "lighting, sharp focus, high detail, professional photography). "
         "Reply ONLY with the English prompt, without quotes or extra text."
     )
     try:
@@ -246,10 +291,11 @@ def enhance_image_prompt(prompt):
             model=GROQ_MODEL,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": user_content},
             ],
-            max_tokens=300,
+            max_tokens=400,
             temperature=0.7,
+            **reasoning_param(GROQ_MODEL),
         )
         text = (resp.choices[0].message.content or "").strip()
         if text:

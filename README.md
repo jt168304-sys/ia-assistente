@@ -6,8 +6,9 @@ YuIA é um assistente de IA no estilo ChatGPT, com tema escuro (preto e azul). E
 
 - Conversa por texto (envie com Enter ou no botão de enviar).
 - Lê imagens de forma inteligente: usa um modelo de visão da Groq para entender a imagem. Se não der, usa o OCR (Tesseract no computador, ML Kit no APK) como apoio.
-- Gera imagens: use o botão de paleta para criar uma imagem a partir do texto digitado.
-- Pesquisa na web: toque no botão de lupa para o YuIA buscar informações atuais na internet antes de responder. Usa o DuckDuckGo, de graça e sem chave, no computador e no APK.
+- Gera imagens: use o botão de paleta para criar uma imagem a partir do texto digitado. O YuIA pesquisa na web por referências do assunto para gerar imagens mais fiéis (ex.: um personagem de anime fica parecido com o personagem real).
+- Pesquisa na web sempre ativa: a cada pergunta o YuIA busca informações atuais na internet (via DuckDuckGo, de graça e sem chave, no computador e no APK) e usa o que for relevante na resposta.
+- Sabe a data e a hora atuais e informa corretamente quando perguntado.
 - Cria e baixa arquivos: quando a IA escreve código, CSV, JSON, HTML e outros, cada trecho ganha um botão "Baixar". Toda resposta pode ser baixada como arquivo .md ou copiada.
 - Narra as respostas em voz alta, usando a voz do aparelho, e mostra o texto enquanto fala.
 - Escuta pelo microfone (ditado por voz).
