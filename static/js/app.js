@@ -58,7 +58,7 @@
     window.marked.setOptions({ gfm: true, breaks: true });
   }
   function escapeHtml(s) {
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
   function sanitizeLinks(root) {
     root.querySelectorAll("a[href]").forEach((a) => {
@@ -1062,7 +1062,7 @@
     assistant.bubble.innerHTML = `<span class="typing"><span></span><span></span><span></span></span> <span class="gen-label">Gerando imagem...</span>`;
 
     try {
-      let url;
+      let url = "";
       if (IS_NATIVE) {
         if (!NATIVE_CONFIG.apiKey || NATIVE_CONFIG.apiKey === "CHAVE_NAO_CONFIGURADA") {
           throw new Error("APK sem chave de API. Configure o secret GROQ_API_KEY no repositório e recompile.");
@@ -1070,7 +1070,6 @@
         const searchRef = await nativeWebSearch(prompt);
         const enhanced = await enhanceImagePrompt(prompt, searchRef);
         const base = NATIVE_CONFIG.imageApi || "https://image.pollinations.ai/prompt/";
-        let url = "";
         for (let attempt = 0; attempt < 3; attempt++) {
           const seed = Math.floor(Math.random() * 999999) + 1;
           url = `${base.replace(/\/+$/, "")}/${encodeURIComponent(enhanced)}?width=896&height=1024&seed=${seed}&nologo=true&model=flux&enhance=true`;
