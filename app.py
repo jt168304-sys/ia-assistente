@@ -59,7 +59,12 @@ SYSTEM_PROMPT = (
     "delimitado por ``` com a linguagem indicada (ex.: ```python, ```csv, ```json, ```html). "
     "Assim o app permite baixar o arquivo. Seja criativo e proativo: ofereça exemplos, "
     "códigos, planos e formatos úteis. Sempre que fizer sentido, entregue o conteúdo "
-    "pronto para uso e download."
+    "pronto para uso e download. "
+    "NUNCA invente informações. Se você não souber ou não tiver certeza, diga claramente "
+    "que não sabe ou que não encontrou a informação — jamais invente fatos, URLs, números, "
+    "nomes de vídeos, canais, obras, autores ou dados para parecer útil. Responda apenas "
+    "com base no que você realmente sabe ou nos resultados de pesquisa fornecidos no "
+    "contexto."
 )
 
 
@@ -237,9 +242,12 @@ def chat():
         context = web_search(message)
         if context:
             hint = (
-                "Resultados de pesquisa na web sobre a pergunta do usuário. "
-                "Use-os APENAS se ajudarem a responder (dados atuais, notícias, "
-                "referências). Se forem irrelevantes, ignore-os. Cite as fontes quando útil:"
+                "Resultados de pesquisa na web sobre a pergunta do usuário. Se a pergunta "
+                "exigir informação externa ou atual, responda APENAS com base nesses "
+                "resultados. Se a resposta não estiver neles, diga claramente que não "
+                "encontrou informação confiável. Cite as fontes (URLs) quando útil. "
+                "Não invente dados, nomes, vídeos, canais nem URLs que não estejam "
+                "nos resultados:"
             )
             messages.insert(-1, {"role": "system", "content": f"{hint}\n\n{context}"})
 
@@ -305,6 +313,52 @@ def enhance_image_prompt(prompt):
     return prompt
 
 
+def download_image(url, timeout=90):
+    """Baixa a imagem gerada para inspeção."""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def verify_generated_image(prompt, image_bytes):
+    """Usa o modelo de visão para conferir se a imagem gerada corresponde ao pedido.
+    Faz até 2 votos e aceita se qualquer um disser SIM (o modelo de visão é um pouco
+    instável em perguntas binárias). Em erro, aceita (True) para não bloquear o fluxo."""
+
+    def vote():
+        b64 = base64.b64encode(image_bytes).decode()
+        data_url = f"data:image/jpeg;base64,{b64}"
+        messages = [
+            {"role": "system", "content": "Você é um verificador de imagens. Responda somente SIM ou NÃO."},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Diga SIM se a imagem mostra: {prompt}. NÃO caso contrário. Responda somente SIM ou NÃO.",
+                    },
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            },
+        ]
+        resp = client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=messages,
+            max_tokens=15,
+            temperature=0,
+            **reasoning_param(VISION_MODEL),
+        )
+        ans = (resp.choices[0].message.content or "").strip().lower()
+        return ans.startswith("sim") or " sim" in ans or ans == "sim."
+
+    if not client or not VISION_MODEL or VISION_MODEL.lower() == "none":
+        return True
+    try:
+        return vote() or vote()
+    except Exception:
+        return True
+
+
 @app.post("/api/image")
 def image():
     data = request.get_json(silent=True) or {}
@@ -320,15 +374,26 @@ def image():
 
     width = max(256, min(1536, width))
     height = max(256, min(1536, height))
-    seed = random.randint(1, 999999)
 
     enhanced = enhance_image_prompt(prompt)
-    url = (
-        f"{IMAGE_API_URL.rstrip('/')}/"
-        f"{urllib.parse.quote(enhanced)}"
-        f"?width={width}&height={height}&seed={seed}&nologo=true&model=flux&enhance=true"
-    )
-    return jsonify({"url": url, "prompt": prompt})
+    candidate = None
+    for _ in range(3):
+        seed = random.randint(1, 999999)
+        candidate = (
+            f"{IMAGE_API_URL.rstrip('/')}/"
+            f"{urllib.parse.quote(enhanced)}"
+            f"?width={width}&height={height}&seed={seed}&nologo=true&model=flux&enhance=true"
+        )
+        try:
+            data_bytes = download_image(candidate)
+        except Exception:
+            continue
+        if verify_generated_image(prompt, data_bytes):
+            break
+
+    if not candidate:
+        return jsonify({"error": "falha ao gerar a imagem"}), 502
+    return jsonify({"url": candidate, "prompt": prompt})
 
 
 if __name__ == "__main__":

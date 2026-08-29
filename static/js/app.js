@@ -708,6 +708,75 @@
     }
   }
 
+  function blobToDataURL(blob) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = reject;
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  /* Chamada não-streaming com modelo de visão (para conferir a imagem gerada). */
+  async function groqVisionNonStream(text, dataUrl, maxTokens) {
+    const model = NATIVE_CONFIG.visionModel || "qwen/qwen3.6-27b";
+    const messages = [
+      { role: "system", content: "Você é um verificador de imagens geradas por IA. Responda apenas SIM ou NÃO." },
+      {
+        role: "user",
+        content: [
+          { type: "text", text },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ],
+      },
+    ];
+    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + NATIVE_CONFIG.apiKey,
+      },
+      body: JSON.stringify({
+        model: model,
+        messages: messages,
+        temperature: 0,
+        max_tokens: maxTokens || 50,
+        ...reasoningParam(model),
+      }),
+    });
+    if (!resp.ok) throw new Error("Erro da API Groq (HTTP " + resp.status + ")");
+    const j = await resp.json();
+    return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
+  }
+
+  /* Confere com visão se a imagem gerada corresponde ao pedido. Faz até 2 votos e
+   * aceita se qualquer um disser SIM (o modelo de visão é instável em binário).
+   * Se a verificação falhar (rede, modelo sem visão, etc.), aceita a imagem atual. */
+  async function verifyGeneratedImage(prompt, url) {
+    try {
+      if (!NATIVE_CONFIG.visionModel || NATIVE_CONFIG.visionModel.toLowerCase() === "none") {
+        return true;
+      }
+      const resp = await fetch(url);
+      if (!resp.ok) return false;
+      const blob = await resp.blob();
+      if (!blob || blob.size > 12_000_000) return true;
+      const dataUrl = await blobToDataURL(blob);
+      const vote = async () => {
+        const ans = await groqVisionNonStream(
+          'Diga SIM se a imagem mostra: "' + prompt + '". NÃO caso contrário. Responda somente SIM ou NÃO.',
+          dataUrl,
+          15
+        );
+        const a = (ans || "").trim().toLowerCase();
+        return a.indexOf("sim") === 0 || a.indexOf(" sim") !== -1 || a === "sim.";
+      };
+      return (await vote()) || (await vote());
+    } catch (e) {
+      return true;
+    }
+  }
+
   function nativeGroqMessages(text, image, ocrText) {
     const msgs = [{
       role: "system",
@@ -720,6 +789,11 @@
         "Seja CONCISO: responda de forma direta e enxuta, sem introduções longas, sem " +
         "repetição. Prefira respostas curtas (2 a 5 parágrafos no máximo, ou listas curtas). " +
         "Não enumere tudo o que sabe — responda apenas o que foi perguntado. " +
+        "NUNCA invente informações: se você não souber ou não tiver certeza, diga " +
+        "claramente que não sabe ou que não encontrou a informação. Jamais invente fatos, " +
+        "URLs, números, nomes de vídeos, canais, obras, autores ou dados — nem mesmo para " +
+        "parecer útil. Responda apenas com base no que realmente sabe ou nos resultados de " +
+        "pesquisa fornecidos no contexto. " +
         currentDateTime() + ". Use isso para perguntas sobre data e hora. " +
         "Quando o usuário anexar uma imagem, o texto extraído dela via OCR será " +
         "fornecido no contexto — use-o para responder perguntas sobre o conteúdo. " +
@@ -770,24 +844,50 @@
     return arr.slice(arr.length - n);
   }
 
-  async function nativeWebSearch(query) {
-    try {
-      const raw = window.AndroidBridge.webSearch(query);
-      const list = JSON.parse(raw || "[]");
-      const lines = list.slice(0, 5).map(
-        (r, i) => `${i + 1}. ${r.title || ""}\n   URL: ${r.url || ""}\n   ${(r.snippet || "").slice(0, 220)}`
-      );
-      return lines.join("\n\n");
-    } catch (e) {
-      return "";
-    }
+  /* Busca nativa assíncrona: o bridge roda em thread própria e devolve o
+   * resultado via window.onWebSearchResult. Timeout de 8s evita travar o chat. */
+  const pendingSearches = {};
+  window.onWebSearchResult = (token, json) => {
+    const done = pendingSearches[token];
+    if (done) { done(json || "[]"); delete pendingSearches[token]; }
+  };
+
+  function nativeWebSearch(query) {
+    return new Promise((resolve) => {
+      try {
+        if (!window.AndroidBridge.webSearchAsync) { resolve(""); return; }
+        const token = "ws-" + Math.random().toString(36).slice(2);
+        const timer = setTimeout(() => {
+          delete pendingSearches[token];
+          resolve("");
+        }, 8000);
+        pendingSearches[token] = (json) => {
+          clearTimeout(timer);
+          try {
+            const list = JSON.parse(json || "[]");
+            const lines = list.slice(0, 5).map(
+              (r, i) => `${i + 1}. ${r.title || ""}\n   URL: ${r.url || ""}\n   ${(r.snippet || "").slice(0, 220)}`
+            );
+            resolve(lines.join("\n\n"));
+          } catch (e) {
+            resolve("");
+          }
+        };
+        window.AndroidBridge.webSearchAsync(query, token);
+      } catch (e) {
+        resolve("");
+      }
+    });
   }
 
   function injectSearchContext(messages, context) {
     if (!context) return messages;
     const hint =
-      "Resultados de pesquisa na web sobre a pergunta do usuário. Use-os para dar " +
-      "informações atuais e cite as fontes quando útil:";
+      "Resultados de pesquisa na web sobre a pergunta do usuário. Se a pergunta exigir " +
+      "informação externa ou atual, responda APENAS com base nesses resultados. Se a " +
+      "resposta não estiver neles, diga claramente que não encontrou informação " +
+      "confiável. Cite as fontes (URLs) quando útil. Não invente dados, nomes, vídeos, " +
+      "canais nem URLs que não estejam nos resultados:";
     const msgs = messages.slice();
     msgs.splice(msgs.length - 1, 0, { role: "system", content: hint + "\n\n" + context });
     return msgs;
@@ -834,6 +934,12 @@
         if (text) {
           searchContext = await nativeWebSearch(text);
         }
+        const runTextOcr = () => groqStream(
+          NATIVE_CONFIG.model,
+          injectSearchContext(nativeGroqMessages(text, image, nativeOcrResult), searchContext),
+          controller,
+          (c) => applyDelta(assistant, c)
+        );
         try {
           if (hasVision) {
             await groqStream(
@@ -842,25 +948,21 @@
               controller,
               (c) => applyDelta(assistant, c)
             );
+            if ((!assistant.raw || !assistant.raw.trim()) && nativeOcrResult) {
+              assistant.raw = "";
+              assistant.displayLen = 0;
+              assistant.bubble.innerHTML = `<span class="typing"><span></span><span></span><span></span></span>`;
+              await runTextOcr();
+            }
           } else {
-            await groqStream(
-              NATIVE_CONFIG.model,
-              injectSearchContext(nativeGroqMessages(text, image, nativeOcrResult), searchContext),
-              controller,
-              (c) => applyDelta(assistant, c)
-            );
+            await runTextOcr();
           }
         } catch (visionErr) {
           if (hasVision && nativeOcrResult) {
             assistant.raw = "";
             assistant.displayLen = 0;
             assistant.bubble.innerHTML = `<span class="typing"><span></span><span></span><span></span></span>`;
-            await groqStream(
-              NATIVE_CONFIG.model,
-              injectSearchContext(nativeGroqMessages(text, image, nativeOcrResult), searchContext),
-              controller,
-              (c) => applyDelta(assistant, c)
-            );
+            await runTextOcr();
           } else {
             throw visionErr;
           }
@@ -888,6 +990,12 @@
           },
           () => {}
         );
+      }
+      if (!assistant.raw || !assistant.raw.trim()) {
+        assistant.raw =
+          "Não consegui gerar uma resposta agora. Tente reformular a pergunta ou verifique a conexão.";
+        assistant.displayLen = 0;
+        setBubbleHTML(assistant, assistant.raw);
       }
       if (sentenceBuffer.text.trim()) {
         ttsSpeak(sentenceBuffer.text.trim());
@@ -962,8 +1070,12 @@
         const searchRef = await nativeWebSearch(prompt);
         const enhanced = await enhanceImagePrompt(prompt, searchRef);
         const base = NATIVE_CONFIG.imageApi || "https://image.pollinations.ai/prompt/";
-        const seed = Math.floor(Math.random() * 999999) + 1;
-        url = `${base.replace(/\/+$/, "")}/${encodeURIComponent(enhanced)}?width=896&height=1024&seed=${seed}&nologo=true&model=flux&enhance=true`;
+        let url = "";
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const seed = Math.floor(Math.random() * 999999) + 1;
+          url = `${base.replace(/\/+$/, "")}/${encodeURIComponent(enhanced)}?width=896&height=1024&seed=${seed}&nologo=true&model=flux&enhance=true`;
+          if (await verifyGeneratedImage(prompt, url)) break;
+        }
       } else {
         const resp = await fetch("/api/image", {
           method: "POST",

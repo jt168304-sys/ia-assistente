@@ -246,38 +246,53 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         }
 
         /* Pesquisa na web gratuita (DuckDuckGo) — sem chave e sem cartão.
-         * Retorna um array JSON: [{"title","url","snippet"}, ...] */
+         * Versão ASSÍNCRONA: roda em thread própria e devolve o resultado via
+         * callback JS (onWebSearchResult), para não travar o thread de JS do
+         * WebView durante o download. Resultado: array JSON
+         * [{"title","url","snippet"}, ...]. */
         @JavascriptInterface
-        public String webSearch(final String query) {
-            if (query == null || query.trim().isEmpty()) return "[]";
-            try {
-                String html = ddgHtml(query.trim());
-                Pattern linkPat = Pattern.compile(
-                        "<a[^>]*class=\"result__a\"[^>]*href=\"([^\"]*)\"[^>]*>(.*?)</a>",
-                        Pattern.DOTALL);
-                Pattern snipPat = Pattern.compile(
-                        "<a[^>]*class=\"result__snippet\"[^>]*>(.*?)</a>",
-                        Pattern.DOTALL);
-                Matcher lm = linkPat.matcher(html);
-                Matcher sm = snipPat.matcher(html);
-                StringBuilder out = new StringBuilder("[");
-                int count = 0;
-                while (lm.find() && count < 5) {
-                    String title = stripHtml(lm.group(2));
-                    String href = decodeDdgUrl(lm.group(1));
-                    String snippet = "";
-                    if (sm.find()) snippet = stripHtml(sm.group(1));
-                    if (count > 0) out.append(",");
-                    out.append("{\"title\":").append(jsonString(title))
-                       .append(",\"url\":").append(jsonString(href))
-                       .append(",\"snippet\":").append(jsonString(snippet)).append("}");
-                    count++;
+        public void webSearchAsync(final String query, final String token) {
+            new Thread(() -> {
+                String json;
+                try {
+                    json = webSearchNow(query);
+                } catch (Exception e) {
+                    json = "[]";
                 }
-                out.append("]");
-                return out.toString();
-            } catch (Exception e) {
-                return "[]";
+                jsCallback("onWebSearchResult", "\"" + token + "\", " + json);
+            }).start();
+        }
+    }
+
+    private String webSearchNow(String query) {
+        if (query == null || query.trim().isEmpty()) return "[]";
+        try {
+            String html = ddgHtml(query.trim());
+            Pattern linkPat = Pattern.compile(
+                    "<a[^>]*class=\"result__a\"[^>]*href=\"([^\"]*)\"[^>]*>(.*?)</a>",
+                    Pattern.DOTALL);
+            Pattern snipPat = Pattern.compile(
+                    "<a[^>]*class=\"result__snippet\"[^>]*>(.*?)</a>",
+                    Pattern.DOTALL);
+            Matcher lm = linkPat.matcher(html);
+            Matcher sm = snipPat.matcher(html);
+            StringBuilder out = new StringBuilder("[");
+            int count = 0;
+            while (lm.find() && count < 5) {
+                String title = stripHtml(lm.group(2));
+                String href = decodeDdgUrl(lm.group(1));
+                String snippet = "";
+                if (sm.find()) snippet = stripHtml(sm.group(1));
+                if (count > 0) out.append(",");
+                out.append("{\"title\":").append(jsonString(title))
+                   .append(",\"url\":").append(jsonString(href))
+                   .append(",\"snippet\":").append(jsonString(snippet)).append("}");
+                count++;
             }
+            out.append("]");
+            return out.toString();
+        } catch (Exception e) {
+            return "[]";
         }
     }
 
