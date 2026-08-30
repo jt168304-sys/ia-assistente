@@ -253,6 +253,42 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             });
         }
 
+        /* Salva uma imagem em base64 (gerada via HuggingFace) na pasta Downloads. */
+        @JavascriptInterface
+        public void saveBase64Image(final String b64, final String filename) {
+            if (b64 == null || b64.isEmpty()) return;
+            new Thread(() -> {
+                try {
+                    byte[] bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT);
+                    String safeName = sanitizeFilename(filename);
+                    if (Build.VERSION.SDK_INT >= 29) {
+                        android.content.ContentValues values = new android.content.ContentValues();
+                        values.put(MediaStore.MediaColumns.DISPLAY_NAME, safeName);
+                        values.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+                        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/IAAssistente");
+                        Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                        if (uri != null) {
+                            try (FileOutputStream fos = (FileOutputStream) getContentResolver().openOutputStream(uri)) {
+                                if (fos != null) fos.write(bytes);
+                            }
+                        }
+                    } else {
+                        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "IAAssistente");
+                        if (!dir.exists()) dir.mkdirs();
+                        File f = new File(dir, safeName);
+                        try (FileOutputStream fos = new FileOutputStream(f)) {
+                            fos.write(bytes);
+                        }
+                    }
+                    runOnUiThread(() -> Toast.makeText(MainActivity.this,
+                            "Imagem salva: Downloads/IAAssistente", Toast.LENGTH_SHORT).show());
+                } catch (Exception e) {
+                    runOnUiThread(() -> Toast.makeText(MainActivity.this,
+                            "Falha ao salvar imagem", Toast.LENGTH_SHORT).show());
+                }
+            }).start();
+        }
+
         /* Pesquisa na web gratuita (DuckDuckGo) — sem chave e sem cartão.
          * Versão ASSÍNCRONA: roda em thread própria e devolve o resultado via
          * callback JS (onWebSearchResult), para não travar o thread de JS do

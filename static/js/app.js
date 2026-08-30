@@ -28,6 +28,8 @@
     model: "openai/gpt-oss-120b",
     visionModel: "qwen/qwen3.6-27b",
     imageApi: "https://image.pollinations.ai/prompt/",
+    hfToken: "",
+    hfImageModel: "stabilityai/stable-diffusion-xl-base-1.0",
   };
 
   if (IS_NATIVE) {
@@ -394,8 +396,21 @@
     b.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 21h16"/></svg> Baixar imagem`;
     b.addEventListener("click", () => {
       if (IS_NATIVE) {
-        window.AndroidBridge.downloadImage(url, name);
-        toast("Baixando imagem: " + name);
+        if (url && url.indexOf("data:") === 0) {
+          const b64 = url.slice(url.indexOf(",") + 1);
+          window.AndroidBridge.saveBase64Image(b64, name);
+          toast("Salvando imagem: " + name);
+        } else {
+          window.AndroidBridge.downloadImage(url, name);
+          toast("Baixando imagem: " + name);
+        }
+      } else if (url && url.indexOf("data:") === 0) {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
       } else {
         window.open(url, "_blank");
       }
@@ -749,19 +764,14 @@
     return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
   }
 
-  /* Confere com visão se a imagem gerada corresponde ao pedido. Faz até 2 votos e
-   * aceita se qualquer um disser SIM (o modelo de visão é instável em binário).
-   * Se a verificação falhar (rede, modelo sem visão, etc.), aceita a imagem atual. */
-  async function verifyGeneratedImage(prompt, url) {
+  /* Confere com visão se a imagem (já em dataUrl) corresponde ao pedido.
+   * Faz até 2 votos e aceita se qualquer um disser SIM (o modelo de visão é
+   * instável em binário). Em erro, aceita para não bloquear o fluxo. */
+  async function verifyImageData(prompt, dataUrl) {
     try {
       if (!NATIVE_CONFIG.visionModel || NATIVE_CONFIG.visionModel.toLowerCase() === "none") {
         return true;
       }
-      const resp = await fetch(url);
-      if (!resp.ok) return false;
-      const blob = await resp.blob();
-      if (!blob || blob.size > 12_000_000) return true;
-      const dataUrl = await blobToDataURL(blob);
       const vote = async () => {
         const ans = await groqVisionNonStream(
           'Diga SIM se a imagem mostra: "' + prompt + '". NÃO caso contrário. Responda somente SIM ou NÃO.',
@@ -772,6 +782,19 @@
         return a.indexOf("sim") === 0 || a.indexOf(" sim") !== -1 || a === "sim.";
       };
       return (await vote()) || (await vote());
+    } catch (e) {
+      return true;
+    }
+  }
+
+  async function verifyGeneratedImage(prompt, url) {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) return false;
+      const blob = await resp.blob();
+      if (!blob || blob.size > 12_000_000) return true;
+      const dataUrl = await blobToDataURL(blob);
+      return await verifyImageData(prompt, dataUrl);
     } catch (e) {
       return true;
     }
@@ -1063,17 +1086,47 @@
 
     try {
       let url = "";
+      let dataUrl = "";
       if (IS_NATIVE) {
         if (!NATIVE_CONFIG.apiKey || NATIVE_CONFIG.apiKey === "CHAVE_NAO_CONFIGURADA") {
           throw new Error("APK sem chave de API. Configure o secret GROQ_API_KEY no repositório e recompile.");
         }
         const searchRef = await nativeWebSearch(prompt);
         const enhanced = await enhanceImagePrompt(prompt, searchRef);
-        const base = NATIVE_CONFIG.imageApi || "https://image.pollinations.ai/prompt/";
-        for (let attempt = 0; attempt < 3; attempt++) {
-          const seed = Math.floor(Math.random() * 999999) + 1;
-          url = `${base.replace(/\/+$/, "")}/${encodeURIComponent(enhanced)}?width=896&height=1024&seed=${seed}&nologo=true&model=flux&enhance=true`;
-          if (await verifyGeneratedImage(prompt, url)) break;
+        // Primário: HuggingFace (texto-para-imagem)
+        if (NATIVE_CONFIG.hfToken) {
+          try {
+            const hfModel = NATIVE_CONFIG.hfImageModel || "stabilityai/stable-diffusion-xl-base-1.0";
+            const hfResp = await fetch(
+              "https://router.huggingface.co/hf-inference/models/" + encodeURIComponent(hfModel),
+              {
+                method: "POST",
+                headers: {
+                  Authorization: "Bearer " + NATIVE_CONFIG.hfToken,
+                  "Content-Type": "application/json",
+                  Accept: "image/*",
+                },
+                body: JSON.stringify({
+                  inputs: enhanced,
+                  parameters: { width: 896, height: 1024, num_inference_steps: 30, guidance_scale: 7.5 },
+                }),
+              }
+            );
+            if (hfResp.ok) {
+              const blob = await hfResp.blob();
+              const d = await blobToDataURL(blob);
+              if (d && d.length > 1000) dataUrl = d;
+            }
+          } catch (e) { /* cai para o fallback */ }
+        }
+        // Suporte: Pollinations (quando o HF falha ou não está configurado)
+        if (!dataUrl) {
+          const base = NATIVE_CONFIG.imageApi || "https://image.pollinations.ai/prompt/";
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const seed = Math.floor(Math.random() * 999999) + 1;
+            url = `${base.replace(/\/+$/, "")}/${encodeURIComponent(enhanced)}?width=896&height=1024&seed=${seed}&nologo=true&model=flux&enhance=true`;
+            if (await verifyGeneratedImage(prompt, url)) break;
+          }
         }
       } else {
         const resp = await fetch("/api/image", {
@@ -1083,14 +1136,19 @@
         });
         let j = {};
         try { j = await resp.json(); } catch (e) { /* ignore */ }
-        if (!resp.ok || !j.url) throw new Error(j.error || "HTTP " + resp.status);
-        url = j.url;
+        if (!resp.ok || (!j.url && !j.dataUrl)) throw new Error(j.error || "HTTP " + resp.status);
+        url = j.url || "";
+        dataUrl = j.dataUrl || "";
       }
 
+      if (!url && !dataUrl) {
+        throw new Error("não foi possível gerar a imagem (sem HF e sem Pollinations)");
+      }
+      const displaySrc = dataUrl || url;
       assistant.bubble.innerHTML = `
         <div class="img-gen">
           <div class="gen-loading"><span class="typing"><span></span><span></span><span></span></span> Aguardando a imagem...</div>
-          <img class="gen-img" src="${escapeHtml(url)}" alt="${escapeHtml(prompt)}" loading="lazy">
+          <img class="gen-img" src="${escapeHtml(displaySrc)}" alt="${escapeHtml(prompt)}" loading="lazy">
           <div class="img-meta">${escapeHtml(prompt)}</div>
         </div>`;
       const img = assistant.bubble.querySelector(".gen-img");
@@ -1105,9 +1163,9 @@
         assistant.bubble.classList.add("err-bubble");
         assistant.bubble.innerHTML = `<span class="err-bubble">Não foi possível carregar a imagem gerada.</span>`;
       };
-      assistant.raw = `![${prompt}](${url})`;
+      assistant.raw = dataUrl ? `![${prompt}](imagem gerada)` : `![${prompt}](${url})`;
       assistant.streaming = false;
-      addDownloadImageAction(assistant, url, "imagem-" + slugify(prompt) + ".jpg");
+      addDownloadImageAction(assistant, displaySrc, "imagem-" + slugify(prompt) + ".jpg");
     } catch (err) {
       assistant.bubble.innerHTML = `<span class="err-bubble">Erro ao gerar imagem: ${escapeHtml(err.message)}</span>`;
     } finally {

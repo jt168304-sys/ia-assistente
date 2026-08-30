@@ -23,6 +23,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b").strip()
 IMAGE_API_URL = os.getenv("IMAGE_API_URL", "https://image.pollinations.ai/prompt/").strip()
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+HF_IMAGE_MODEL = os.getenv("HF_IMAGE_MODEL", "stabilityai/stable-diffusion-xl-base-1.0").strip()
+HF_VIDEO_MODEL = os.getenv("HF_VIDEO_MODEL", "").strip()
 OCR_LANG = os.getenv("OCR_LANG", "por+eng")
 MAX_IMAGE_DIM = 1600
 
@@ -368,6 +371,55 @@ def download_image(url, timeout=90):
         return resp.read()
 
 
+def hf_inference(model, payload, accept="image/*", timeout=180):
+    """Chama a API de inferência do HuggingFace (router). Retorna bytes.
+    Levanta RuntimeError com a mensagem da API em caso de erro."""
+    url = f"https://router.huggingface.co/hf-inference/models/{model}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {HF_TOKEN}",
+            "Content-Type": "application/json",
+            "Accept": accept,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            data = resp.read()
+            if "json" in ctype.lower():
+                try:
+                    msg = json.loads(data)
+                except Exception:
+                    msg = data[:200].decode("utf-8", "replace")
+                raise RuntimeError(f"HuggingFace: {str(msg)[:300]}")
+            if not data:
+                raise RuntimeError("HuggingFace: resposta vazia")
+            return data
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"HuggingFace HTTP {e.code}: {body}")
+
+
+def hf_generate_image(prompt, width, height):
+    """Gera imagem via HuggingFace (texto-para-imagem). Retorna bytes JPEG/PNG."""
+    return hf_inference(
+        HF_IMAGE_MODEL,
+        {
+            "inputs": prompt,
+            "parameters": {
+                "width": max(256, min(1024, width)),
+                "height": max(256, min(1024, height)),
+                "num_inference_steps": 30,
+                "guidance_scale": 7.5,
+            },
+        },
+        accept="image/*",
+    )
+
+
 def verify_generated_image(prompt, image_bytes):
     """Usa o modelo de visão para conferir se a imagem gerada corresponde ao pedido.
     Faz até 2 votos e aceita se qualquer um disser SIM (o modelo de visão é um pouco
@@ -417,13 +469,31 @@ def image():
     if not prompt:
         return jsonify({"error": "prompt vazio"}), 400
 
-    if not IMAGE_API_URL:
-        return jsonify({"error": "geração de imagem não configurada"}), 500
-
     width = max(256, min(1536, width))
     height = max(256, min(1536, height))
 
     enhanced = enhance_image_prompt(prompt)
+
+    # Primário: HuggingFace (texto-para-imagem) com verificação por visão.
+    if HF_TOKEN and HF_IMAGE_MODEL:
+        try:
+            data_bytes = hf_generate_image(enhanced, width, height)
+            if verify_generated_image(prompt, data_bytes):
+                b64 = base64.b64encode(data_bytes).decode()
+                return jsonify(
+                    {
+                        "dataUrl": f"data:image/jpeg;base64,{b64}",
+                        "provider": "huggingface",
+                        "prompt": prompt,
+                    }
+                )
+        except Exception as e:
+            app.logger.warning("HF image falhou (%s); usando fallback", e)
+
+    # Suporte/fallback: Pollinations (com retry + verificação por visão).
+    if not IMAGE_API_URL:
+        return jsonify({"error": "geração de imagem não configurada (sem HF e sem Pollinations)"}), 500
+
     candidate = None
     for _ in range(3):
         seed = random.randint(1, 999999)
@@ -441,7 +511,47 @@ def image():
 
     if not candidate:
         return jsonify({"error": "falha ao gerar a imagem"}), 502
-    return jsonify({"url": candidate, "prompt": prompt})
+    return jsonify({"url": candidate, "provider": "pollinations", "prompt": prompt})
+
+
+@app.post("/api/video")
+def video():
+    """Gera vídeo via HuggingFace (texto-para-vídeo). Requer HF_TOKEN e HF_VIDEO_MODEL."""
+    data = request.get_json(silent=True) or {}
+    prompt = (data.get("prompt") or "").strip()
+
+    if not prompt:
+        return jsonify({"error": "prompt vazio"}), 400
+
+    if not HF_TOKEN or not HF_VIDEO_MODEL:
+        return jsonify(
+            {
+                "error": (
+                    "Geração de vídeo não configurada. Defina HF_TOKEN e HF_VIDEO_MODEL "
+                    "(ex.: HF_VIDEO_MODEL=Wan-AI/Wan2.1-T2V-1.3B). A API do HuggingFace só "
+                    "funciona se a sua conta tiver acesso ao modelo."
+                )
+            }
+        ), 501
+
+    try:
+        data_bytes = hf_inference(
+            HF_VIDEO_MODEL,
+            {"inputs": prompt, "parameters": {"num_frames": 32}},
+            accept="video/*,application/octet-stream",
+            timeout=300,
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+    b64 = base64.b64encode(data_bytes).decode()
+    return jsonify(
+        {
+            "dataUrl": f"data:video/mp4;base64,{b64}",
+            "provider": "huggingface",
+            "prompt": prompt,
+        }
+    )
 
 
 if __name__ == "__main__":
