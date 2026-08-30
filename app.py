@@ -3,6 +3,7 @@ import io
 import json
 import os
 import random
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -188,18 +189,63 @@ def stream_chat(messages, model, max_tokens=1500):
     )
 
 
+_search_cache: dict = {}
+_SEARCH_TTL = 10 * 60  # segundos
+
+
+def _wikipedia_search(query, max_results=5):
+    """Fallback confiável (sem chave): busca na Wikipédia em português."""
+    url = (
+        "https://pt.wikipedia.org/w/api.php?action=query&list=search&srsearch="
+        + urllib.parse.quote(query)
+        + f"&srlimit={max_results}&format=json"
+    )
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+        },
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        data = json.load(resp)
+    out = []
+    for r in data.get("query", {}).get("search", [])[:max_results]:
+        title = (r.get("title") or "").strip()
+        snippet = re.sub(r"<[^>]+>", "", r.get("snippet") or "").strip()
+        page_url = "https://pt.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
+        out.append({"title": title, "href": page_url, "body": snippet})
+    return out
+
+
 def web_search(query, max_results=5):
-    """Busca na web usando DuckDuckGo (pacote 'ddgs'). Retorna string formatada ou ''."""
+    """Busca na web: DuckDuckGo (ddgs) com fallback para a Wikipédia.
+    Retorna string formatada ou ''."""
+    if not query or not query.strip():
+        return ""
+    query = query.strip()
+
+    cached = _search_cache.get(query)
+    if cached and time.time() - cached[1] < _SEARCH_TTL:
+        return cached[0]
+
+    results = []
     try:
         from ddgs import DDGS
     except Exception:
-        return ""
+        results = []
+    else:
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
+        except Exception:
+            results = []
 
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-    except Exception:
-        return ""
+    if not results:
+        try:
+            results = _wikipedia_search(query, max_results)
+        except Exception:
+            results = []
 
     if not results:
         return ""
@@ -212,7 +258,9 @@ def web_search(query, max_results=5):
         if len(body) > 180:
             body = body[:180].rsplit(" ", 1)[0] + "..."
         lines.append(f"{i}. {title}\n   URL: {href}\n   {body}")
-    return "\n\n".join(lines)
+    text = "\n\n".join(lines)
+    _search_cache[query] = (text, time.time())
+    return text
 
 
 @app.post("/api/chat")

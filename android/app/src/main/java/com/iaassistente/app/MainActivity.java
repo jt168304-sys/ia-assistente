@@ -30,6 +30,7 @@ import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -41,7 +42,13 @@ import java.net.URL;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -58,6 +65,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     private String voiceLang = "pt-BR";
     private boolean ttsReady = false;
     private String cachedConfig = null;
+    private final Map<String, String[]> searchCache = new ConcurrentHashMap<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -266,8 +274,84 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
 
     private String webSearchNow(String query) {
         if (query == null || query.trim().isEmpty()) return "[]";
+        String q = query.trim();
+        long now = System.currentTimeMillis();
+        String[] cached = searchCache.get(q);
+        if (cached != null && now - Long.parseLong(cached[1]) < 10 * 60 * 1000L) {
+            return cached[0];
+        }
         try {
-            String html = ddgHtml(query.trim());
+            List<Map<String, String>> results = new ArrayList<>();
+            try {
+                results.addAll(parseSearchJson(ddgSearch(q)));
+            } catch (Exception ignored) {
+            }
+            if (results.size() < 3) {
+                try {
+                    Set<String> seen = new HashSet<>();
+                    for (Map<String, String> r : results) seen.add(r.get("url"));
+                    for (Map<String, String> w : parseSearchJson(wikipediaSearch(q))) {
+                        String u = w.get("url");
+                        if (u != null && !u.isEmpty() && !seen.contains(u) && results.size() < 5) {
+                            results.add(w);
+                            seen.add(u);
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            String json = toSearchJson(results);
+            searchCache.put(q, new String[]{json, String.valueOf(now)});
+            return json;
+        } catch (Exception e) {
+            return "[]";
+        }
+    }
+
+    /* DuckDuckGo: tenta GET (menos bloqueado) e cai para POST se vier vazio. */
+    private String ddgSearch(String query) throws Exception {
+        String json;
+        try {
+            json = ddgHtml(query, true);
+        } catch (Exception ignored) {
+            json = "[]";
+        }
+        if (json == null || json.trim().isEmpty() || "[]".equals(json.trim())) {
+            try {
+                json = ddgHtml(query, false);
+            } catch (Exception ignored) {
+                json = "[]";
+            }
+        }
+        return json == null ? "[]" : json;
+    }
+
+    private String ddgHtml(String query, boolean useGet) throws Exception {
+        HttpURLConnection conn;
+        if (useGet) {
+            String urlStr = "https://html.duckduckgo.com/html/?q=" + URLEncoder.encode(query, "UTF-8");
+            conn = (HttpURLConnection) new URL(urlStr).openConnection();
+            conn.setRequestMethod("GET");
+        } else {
+            String body = "q=" + URLEncoder.encode(query, "UTF-8") + "&b=&l=br-pt";
+            conn = (HttpURLConnection) new URL("https://html.duckduckgo.com/html/").openConnection();
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+            conn.getOutputStream().write(body.getBytes("UTF-8"));
+        }
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
+        conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*;q=0.8");
+        conn.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9");
+        conn.setConnectTimeout(6000);
+        conn.setReadTimeout(6000);
+        String html = readConnection(conn);
+        return parseDdgHtml(html);
+    }
+
+    private String parseDdgHtml(String html) {
+        if (html == null) return "[]";
+        try {
             Pattern linkPat = Pattern.compile(
                     "<a[^>]*class=\"result__a\"[^>]*href=\"([^\"]*)\"[^>]*>(.*?)</a>",
                     Pattern.DOTALL);
@@ -296,21 +380,70 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         }
     }
 
-    /* Busca no DuckDuckGo via POST em html.duckduckgo.com/html/.
-     * Um User-Agent simples ("Mozilla/5.0") faz o DuckDuckGo devolver a
-     * versão HTML clássica, que dá para parsear sem chave de API. */
-    private String ddgHtml(String query) throws Exception {
-        String body = "q=" + URLEncoder.encode(query, "UTF-8") + "&b=&l=br-pt";
-        HttpURLConnection conn = (HttpURLConnection) new URL("https://html.duckduckgo.com/html/").openConnection();
-        conn.setRequestMethod("POST");
-        conn.setDoOutput(true);
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0");
-        conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*;q=0.8");
-        conn.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9");
-        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-        conn.setConnectTimeout(12000);
-        conn.setReadTimeout(12000);
-        conn.getOutputStream().write(body.getBytes("UTF-8"));
+    /* Wikipedia (pt): confiável sem chave, usado quando o DuckDuckGo falha.
+     * Retorna o mesmo formato [{"title","url","snippet"}] do DDG. */
+    private String wikipediaSearch(String query) throws Exception {
+        String urlStr = "https://pt.wikipedia.org/w/api.php?action=query&list=search&srsearch="
+                + URLEncoder.encode(query, "UTF-8") + "&srlimit=5&format=json";
+        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
+        conn.setRequestProperty("Accept", "application/json");
+        conn.setConnectTimeout(6000);
+        conn.setReadTimeout(6000);
+        String body = readConnection(conn);
+        JSONObject root = new JSONObject(body);
+        JSONArray search = root.optJSONObject("query").optJSONArray("search");
+        StringBuilder out = new StringBuilder("[");
+        if (search != null) {
+            for (int i = 0; i < search.length(); i++) {
+                JSONObject r = search.getJSONObject(i);
+                String title = r.optString("title", "");
+                String snippet = stripHtml(r.optString("snippet", ""));
+                String url = "https://pt.wikipedia.org/wiki/"
+                        + URLEncoder.encode(title.replace(' ', '_'), "UTF-8");
+                if (i > 0) out.append(",");
+                out.append("{\"title\":").append(jsonString(title))
+                   .append(",\"url\":").append(jsonString(url))
+                   .append(",\"snippet\":").append(jsonString(snippet)).append("}");
+            }
+        }
+        out.append("]");
+        return out.toString();
+    }
+
+    private List<Map<String, String>> parseSearchJson(String json) {
+        List<Map<String, String>> list = new ArrayList<>();
+        if (json == null || json.trim().isEmpty()) return list;
+        try {
+            JSONArray arr = new JSONArray(json);
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject o = arr.getJSONObject(i);
+                Map<String, String> m = new LinkedHashMap<>();
+                m.put("title", o.optString("title", ""));
+                m.put("url", o.optString("url", ""));
+                m.put("snippet", o.optString("snippet", ""));
+                list.add(m);
+            }
+        } catch (Exception ignored) {
+        }
+        return list;
+    }
+
+    private String toSearchJson(List<Map<String, String>> results) {
+        StringBuilder out = new StringBuilder("[");
+        for (int i = 0; i < results.size(); i++) {
+            Map<String, String> r = results.get(i);
+            if (i > 0) out.append(",");
+            out.append("{\"title\":").append(jsonString(r.get("title")))
+               .append(",\"url\":").append(jsonString(r.get("url")))
+               .append(",\"snippet\":").append(jsonString(r.get("snippet"))).append("}");
+        }
+        out.append("]");
+        return out.toString();
+    }
+
+    private String readConnection(HttpURLConnection conn) throws Exception {
         int code = conn.getResponseCode();
         InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
         ByteArrayOutputStream bos = new ByteArrayOutputStream();

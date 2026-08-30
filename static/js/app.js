@@ -860,7 +860,7 @@
         const timer = setTimeout(() => {
           delete pendingSearches[token];
           resolve("");
-        }, 8000);
+        }, 20000);
         pendingSearches[token] = (json) => {
           clearTimeout(timer);
           try {
