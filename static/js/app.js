@@ -1060,6 +1060,9 @@
 
   /* ---------------- Image generation ---------------- */
   let imageBusy = false;
+  /* Se o provider do HF rejeitar o modelo, pula o HF por 10min para não
+   * atrasar os próximos pedidos de imagem (fallback direto para Pollinations). */
+  let hfImageBlockedUntil = 0;
 
   function setImageBusy(state) {
     imageBusy = state;
@@ -1094,7 +1097,7 @@
         const searchRef = await nativeWebSearch(prompt);
         const enhanced = await enhanceImagePrompt(prompt, searchRef);
         // Primário: HuggingFace (texto-para-imagem)
-        if (NATIVE_CONFIG.hfToken) {
+        if (NATIVE_CONFIG.hfToken && Date.now() >= hfImageBlockedUntil) {
           try {
             const hfModel = NATIVE_CONFIG.hfImageModel || "stabilityai/stable-diffusion-xl-base-1.0";
             const hfResp = await fetch(
@@ -1116,6 +1119,8 @@
               const blob = await hfResp.blob();
               const d = await blobToDataURL(blob);
               if (d && d.length > 1000) dataUrl = d;
+            } else if ([400, 401, 403, 404, 410].indexOf(hfResp.status) !== -1) {
+              hfImageBlockedUntil = Date.now() + 600000;
             }
           } catch (e) { /* cai para o fallback */ }
         }

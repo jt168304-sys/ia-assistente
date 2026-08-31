@@ -26,6 +26,10 @@ IMAGE_API_URL = os.getenv("IMAGE_API_URL", "https://image.pollinations.ai/prompt
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 HF_IMAGE_MODEL = os.getenv("HF_IMAGE_MODEL", "stabilityai/stable-diffusion-xl-base-1.0").strip()
 HF_VIDEO_MODEL = os.getenv("HF_VIDEO_MODEL", "").strip()
+
+# Quando o provider do HF rejeita o modelo (400/401/403/404/410), pula o HF por
+# um tempo para não gastar segundos a cada pedido. Zera quando o HF volta a funcionar.
+_hf_image_blocked_until = 0.0
 OCR_LANG = os.getenv("OCR_LANG", "por+eng")
 MAX_IMAGE_DIM = 1600
 
@@ -420,6 +424,12 @@ def hf_generate_image(prompt, width, height):
     )
 
 
+def hf_error_code(e):
+    """Extrai o código HTTP do erro do HuggingFace (0 se não for HTTP)."""
+    m = re.search(r"HTTP (\d+)", str(e))
+    return int(m.group(1)) if m else 0
+
+
 def verify_generated_image(prompt, image_bytes):
     """Usa o modelo de visão para conferir se a imagem gerada corresponde ao pedido.
     Faz até 2 votos e aceita se qualquer um disser SIM (o modelo de visão é um pouco
@@ -475,10 +485,15 @@ def image():
     enhanced = enhance_image_prompt(prompt)
 
     # Primário: HuggingFace (texto-para-imagem) com verificação por visão.
-    if HF_TOKEN and HF_IMAGE_MODEL:
+    # Se o provider rejeitar o modelo (400/401/403/404/410), marca como
+    # indisponível por 10min para não atrasar os próximos pedidos.
+    global _hf_image_blocked_until
+    now = time.time()
+    if HF_TOKEN and HF_IMAGE_MODEL and now >= _hf_image_blocked_until:
         try:
             data_bytes = hf_generate_image(enhanced, width, height)
             if verify_generated_image(prompt, data_bytes):
+                _hf_image_blocked_until = 0.0
                 b64 = base64.b64encode(data_bytes).decode()
                 return jsonify(
                     {
@@ -488,7 +503,14 @@ def image():
                     }
                 )
         except Exception as e:
-            app.logger.warning("HF image falhou (%s); usando fallback", e)
+            code = hf_error_code(e)
+            if code in (400, 401, 403, 404, 410):
+                _hf_image_blocked_until = now + 600
+                app.logger.warning(
+                    "HF imagem indisponível (HTTP %s); usando Pollinations por 10min", code
+                )
+            else:
+                app.logger.warning("HF image falhou (%s); usando fallback", e)
 
     # Suporte/fallback: Pollinations (com retry + verificação por visão).
     if not IMAGE_API_URL:
