@@ -2,8 +2,6 @@ package com.iaassistente.app;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.DownloadManager;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
@@ -13,8 +11,11 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
+import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -54,16 +55,19 @@ import java.util.regex.Pattern;
 
 public class MainActivity extends Activity implements TextToSpeech.OnInitListener {
 
-    private static final int REQ_SPEECH = 1001;
     private static final int REQ_FILE = 1002;
     private static final int REQ_REC_AUDIO = 1003;
 
     private WebView webView;
     private TextToSpeech tts;
     private TextRecognizer textRecognizer;
+    private SpeechRecognizer speechRecognizer;
     private ValueCallback<Uri[]> filePathCallback;
     private String voiceLang = "pt-BR";
     private boolean ttsReady = false;
+    private volatile boolean ttsBusy = false; // atualizado pelos callbacks do TTS
+    private boolean voiceWanted = false; // mãos-livres ativo (reabrir ao conceder permissão)
+    private volatile boolean suppressVoiceCb = false; // ignora callbacks durante o release
     private String cachedConfig = null;
     private final Map<String, String[]> searchCache = new ConcurrentHashMap<>();
 
@@ -154,7 +158,10 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         @JavascriptInterface
         public void stopSpeak() {
             runOnUiThread(() -> {
-                if (tts != null) tts.stop();
+                if (tts != null) {
+                    tts.stop();
+                    ttsBusy = false;
+                }
             });
         }
 
@@ -172,15 +179,31 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             }
         }
 
+        /* Mãos-livres: liga a escuta contínua (SpeechRecognizer, sem o dialog do
+         * Google). O fim da fala (pausa ~2-3s) é reportado via onVoiceFinal. */
         @JavascriptInterface
-        public void startRecognition() {
+        public void startVoice() {
             runOnUiThread(() -> {
+                voiceWanted = true;
                 if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                     requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_REC_AUDIO);
                     return;
                 }
-                launchRecognition();
+                startContinuousListening();
             });
+        }
+
+        @JavascriptInterface
+        public void stopVoice() {
+            runOnUiThread(() -> {
+                voiceWanted = false;
+                cancelListening();
+            });
+        }
+
+        @JavascriptInterface
+        public boolean isSpeaking() {
+            return ttsBusy;
         }
 
         @JavascriptInterface
@@ -231,61 +254,6 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
                         Toast.makeText(MainActivity.this, "Falha ao salvar arquivo", Toast.LENGTH_SHORT).show();
                     }
                 });
-            }).start();
-        }
-
-        @JavascriptInterface
-        public void downloadImage(final String url, final String filename) {
-            runOnUiThread(() -> {
-                try {
-                    DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
-                    req.setTitle(filename != null ? filename : "imagem.jpg");
-                    req.setDescription("Baixando imagem gerada");
-                    req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-                    req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename != null ? filename : "imagem.jpg");
-                    req.allowScanningByMediaScanner();
-                    DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
-                    dm.enqueue(req);
-                    Toast.makeText(MainActivity.this, "Baixando para Downloads...", Toast.LENGTH_SHORT).show();
-                } catch (Exception e) {
-                    Toast.makeText(MainActivity.this, "Falha ao baixar imagem", Toast.LENGTH_SHORT).show();
-                }
-            });
-        }
-
-        /* Salva uma imagem em base64 (gerada via HuggingFace) na pasta Downloads. */
-        @JavascriptInterface
-        public void saveBase64Image(final String b64, final String filename) {
-            if (b64 == null || b64.isEmpty()) return;
-            new Thread(() -> {
-                try {
-                    byte[] bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT);
-                    String safeName = sanitizeFilename(filename);
-                    if (Build.VERSION.SDK_INT >= 29) {
-                        android.content.ContentValues values = new android.content.ContentValues();
-                        values.put(MediaStore.MediaColumns.DISPLAY_NAME, safeName);
-                        values.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
-                        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/IAAssistente");
-                        Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
-                        if (uri != null) {
-                            try (FileOutputStream fos = (FileOutputStream) getContentResolver().openOutputStream(uri)) {
-                                if (fos != null) fos.write(bytes);
-                            }
-                        }
-                    } else {
-                        File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "IAAssistente");
-                        if (!dir.exists()) dir.mkdirs();
-                        File f = new File(dir, safeName);
-                        try (FileOutputStream fos = new FileOutputStream(f)) {
-                            fos.write(bytes);
-                        }
-                    }
-                    runOnUiThread(() -> Toast.makeText(MainActivity.this,
-                            "Imagem salva: Downloads/IAAssistente", Toast.LENGTH_SHORT).show());
-                } catch (Exception e) {
-                    runOnUiThread(() -> Toast.makeText(MainActivity.this,
-                            "Falha ao salvar imagem", Toast.LENGTH_SHORT).show());
-                }
             }).start();
         }
 
@@ -577,12 +545,135 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         return safe;
     }
 
-    private void launchRecognition() {
-        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, voiceLang);
-        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Fale agora...");
-        startActivityForResult(intent, REQ_SPEECH);
+    /* ---------- Escuta contínua (SpeechRecognizer, sem dialog do Google) ----------
+     * Quem decide quando (re)começar a escuta é o JS; aqui só iniciamos uma sessão,
+     * reportamos parcial/final/erro e liberamos o microfone. A pausa de ~2,5s no fim
+     * da fala faz o reconhecedor entregar o resultado (onResults). */
+    private void startContinuousListening() {
+        if (!voiceWanted) return;
+        releaseRecognizer();
+        try {
+            SpeechRecognizer sr = SpeechRecognizer.createSpeechRecognizer(this);
+            if (sr == null) {
+                voiceWanted = false;
+                jsCallback("onVoiceError", "\"Reconhecimento de voz indisponível neste aparelho\"");
+                return;
+            }
+            speechRecognizer = sr;
+            sr.setRecognitionListener(voiceListener);
+            suppressVoiceCb = false;
+            Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, voiceLang);
+            intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L);
+            intent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L);
+            intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);
+            sr.startListening(intent);
+        } catch (SecurityException se) {
+            jsCallback("onVoiceError", "\"sem-permissao\"");
+        } catch (Exception e) {
+            String msg = e.getMessage() == null ? "Erro ao iniciar microfone" : e.getMessage();
+            jsCallback("onVoiceError", JSONObject.quote(msg));
+        }
+    }
+
+    private final RecognitionListener voiceListener = new RecognitionListener() {
+        @Override
+        public void onReadyForSpeech(Bundle params) {
+        }
+
+        @Override
+        public void onBeginningOfSpeech() {
+        }
+
+        @Override
+        public void onRmsChanged(float rmsdB) {
+        }
+
+        @Override
+        public void onBufferReceived(byte[] buffer) {
+        }
+
+        @Override
+        public void onEndOfSpeech() {
+        }
+
+        @Override
+        public void onError(int error) {
+            if (suppressVoiceCb) return;
+            jsCallback("onVoiceError", JSONObject.quote(speechErrorText(error)));
+            releaseRecognizer();
+        }
+
+        @Override
+        public void onResults(Bundle results) {
+            if (suppressVoiceCb) return;
+            ArrayList<String> list = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+            String text = (list != null && !list.isEmpty()) ? list.get(0) : "";
+            jsCallback("onVoiceFinal", JSONObject.quote(text == null ? "" : text));
+            releaseRecognizer();
+        }
+
+        @Override
+        public void onPartialResults(Bundle partialResults) {
+            if (suppressVoiceCb) return;
+            ArrayList<String> list = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+            String text = (list != null && !list.isEmpty()) ? list.get(0) : "";
+            jsCallback("onVoicePartial", JSONObject.quote(text == null ? "" : text));
+        }
+
+        @Override
+        public void onEvent(int eventType, Bundle params) {
+        }
+    };
+
+    private static String speechErrorText(int e) {
+        switch (e) {
+            case SpeechRecognizer.ERROR_AUDIO:
+                return "Erro de áudio";
+            case SpeechRecognizer.ERROR_CLIENT:
+                return "Reconhecimento ocupado";
+            case SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS:
+                return "sem-permissao";
+            case SpeechRecognizer.ERROR_NETWORK:
+                return "Sem rede para reconhecer a fala";
+            case SpeechRecognizer.ERROR_NETWORK_TIMEOUT:
+                return "Tempo esgotado na rede";
+            case SpeechRecognizer.ERROR_NO_MATCH:
+                return "Não entendi";
+            case SpeechRecognizer.ERROR_RECOGNIZER_BUSY:
+                return "Reconhecimento ocupado";
+            case SpeechRecognizer.ERROR_SERVER:
+                return "Serviço de reconhecimento indisponível";
+            case SpeechRecognizer.ERROR_SPEECH_TIMEOUT:
+                return "Nada foi falado";
+            default:
+                return "Erro no microfone";
+        }
+    }
+
+    /* Libera o microfone/recursos da sessão atual (se existir). */
+    private void releaseRecognizer() {
+        runOnUiThread(() -> {
+            suppressVoiceCb = true;
+            if (speechRecognizer != null) {
+                try {
+                    speechRecognizer.cancel();
+                } catch (Exception ignored) {
+                }
+                try {
+                    speechRecognizer.destroy();
+                } catch (Exception ignored) {
+                }
+                speechRecognizer = null;
+            }
+        });
+    }
+
+    private void cancelListening() {
+        voiceWanted = false;
+        releaseRecognizer();
     }
 
     private void jsCallback(final String fn, final String args) {
@@ -601,6 +692,30 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
                 tts.setLanguage(locale);
             }
             tts.setSpeechRate(1.0f);
+            tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                @Override
+                public void onStart(String utteranceId) {
+                    ttsBusy = true;
+                }
+
+                @Override
+                public void onDone(String utteranceId) {
+                    try {
+                        if (!tts.isSpeaking()) ttsBusy = false;
+                    } catch (Exception ignored) {
+                        ttsBusy = false;
+                    }
+                }
+
+                @Override
+                public void onError(String utteranceId) {
+                    try {
+                        if (!tts.isSpeaking()) ttsBusy = false;
+                    } catch (Exception ignored) {
+                        ttsBusy = false;
+                    }
+                }
+            });
             ttsReady = true;
         } else {
             Toast.makeText(this, "Falha ao iniciar TTS", Toast.LENGTH_SHORT).show();
@@ -610,16 +725,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_SPEECH) {
-            if (resultCode == RESULT_OK && data != null) {
-                ArrayList<String> results = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
-                if (results != null && !results.isEmpty()) {
-                    jsCallback("onVoiceResult", JSONObject.quote(results.get(0)));
-                } else {
-                    jsCallback("onVoiceError", "\"Nada foi reconhecido\"");
-                }
-            }
-        } else if (requestCode == REQ_FILE) {
+        if (requestCode == REQ_FILE) {
             if (filePathCallback != null) {
                 Uri[] results = (resultCode == RESULT_OK && data != null && data.getData() != null)
                         ? new Uri[]{data.getData()} : null;
@@ -640,9 +746,13 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
                                            @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == REQ_REC_AUDIO && grantResults.length > 0
-                && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            launchRecognition();
+        if (requestCode == REQ_REC_AUDIO) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                if (voiceWanted) startContinuousListening();
+            } else {
+                voiceWanted = false;
+                jsCallback("onVoiceError", "\"sem-permissao\"");
+            }
         }
     }
 
@@ -657,6 +767,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
 
     @Override
     protected void onDestroy() {
+        releaseRecognizer();
         if (tts != null) {
             tts.stop();
             tts.shutdown();

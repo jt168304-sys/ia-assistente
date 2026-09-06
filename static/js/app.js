@@ -7,7 +7,6 @@
   const sendBtn = document.getElementById("sendBtn");
   const micBtn = document.getElementById("micBtn");
   const attachBtn = document.getElementById("attachBtn");
-  const imageBtn = document.getElementById("imageBtn");
   const fileInput = document.getElementById("fileInput");
   const previewEl = document.getElementById("imagePreview");
   const newChatBtn = document.getElementById("newChatBtn");
@@ -27,9 +26,6 @@
     apiKey: "",
     model: "openai/gpt-oss-120b",
     visionModel: "qwen/qwen3.6-27b",
-    imageApi: "https://image.pollinations.ai/prompt/",
-    hfToken: "",
-    hfImageModel: "stabilityai/stable-diffusion-xl-base-1.0",
   };
 
   if (IS_NATIVE) {
@@ -388,36 +384,6 @@
     dl.addEventListener("click", () => downloadFile("resposta.md", stripThink(assistant.raw)));
   }
 
-  function addDownloadImageAction(assistant, url, name) {
-    const actions = assistant.row.querySelector(".actions");
-    if (!actions) return;
-    const b = document.createElement("button");
-    b.className = "speak-btn";
-    b.innerHTML = `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 21h16"/></svg> Baixar imagem`;
-    b.addEventListener("click", () => {
-      if (IS_NATIVE) {
-        if (url && url.indexOf("data:") === 0) {
-          const b64 = url.slice(url.indexOf(",") + 1);
-          window.AndroidBridge.saveBase64Image(b64, name);
-          toast("Salvando imagem: " + name);
-        } else {
-          window.AndroidBridge.downloadImage(url, name);
-          toast("Baixando imagem: " + name);
-        }
-      } else if (url && url.indexOf("data:") === 0) {
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = name;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      } else {
-        window.open(url, "_blank");
-      }
-    });
-    actions.appendChild(b);
-  }
-
   /* ---------------- Image attach ---------------- */
   let nativeOcrResult = "";
   let nativeOcrPending = false;
@@ -461,69 +427,204 @@
     previewEl.appendChild(wrap);
   }
 
-  /* ---------------- Voice input (Web Speech Recognition / bridge nativo) ---------------- */
+  /* ---------------- Voz: conversa mãos-livres ----------------
+   * Tocar o microfone liga o modo mãos-livres: o YuIA fica em escuta contínua
+   * (sem o dialog do Google). Quando você faz uma pausa de ~2-3s no fim da
+   * fala, ele envia a mensagem sozinho. Enquanto a resposta é narrada ele não
+   * escuta e, ao terminar, volta a escutar sozinho — até você desligar o botão.
+   * No Android usa o SpeechRecognizer nativo; no navegador, a Web Speech API. */
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  let recorder = null;
-  let recording = false;
 
-  function setRecording(state) {
-    recording = state;
+  let handsFreeOn = false;   // mãos-livres ligado/desligado pelo usuário
+  let recSession = null;     // sessão de reconhecimento ativa (só web)
+  let listeningNow = false;  // há uma escuta em andamento agora
+  let relistenTimer = null;  // poll p/ reabrir a escuta após a resposta falada
+  let lastVoiceToastTs = 0;  // controle p/ não spammar toasts de erro de voz
+
+  function setMicState(state) {
     micBtn.classList.toggle("recording", state);
-    micBtn.title = state ? "Parar ditado" : "Falar (ditado por voz)";
+    micBtn.title = state ? "Mãos-livres ativo · toque para parar" : "Conversa por voz (mãos-livres)";
   }
 
-  window.onVoiceResult = (text) => {
-    setRecording(false);
-    if (text) {
-      inputEl.value = text;
-      autoResize();
-      updateSendBtn();
-    }
-  };
-  window.onVoiceError = (msg) => {
-    setRecording(false);
-    alert("Erro no microfone: " + msg);
-  };
+  function setListeningUi(on) {
+    if (!handsFreeOn) return;
+    micBtn.classList.toggle("listening", !!on);
+  }
 
-  micBtn.addEventListener("click", () => {
-    if (recording) {
-      if (recorder) recorder.stop();
-      return;
-    }
+  /* O TTS terminou? (nativo pergunta ao Android; na web usa a fila interna) */
+  function ttsIdle() {
     if (IS_NATIVE) {
-      window.AndroidBridge.startRecognition();
-      setRecording(true);
+      try { return !window.AndroidBridge.isSpeaking(); } catch (e) { return true; }
+    }
+    if (!window.speechSynthesis) return true;
+    return !window.speechSynthesis.speaking && !ttsSpeaking && ttsQueue.length === 0;
+  }
+
+  function showTranscribed(text) {
+    inputEl.value = text || "";
+    autoResize();
+    updateSendBtn();
+  }
+
+  /* Envia a frase reconhecida como se tivesse sido digitada. */
+  function submitVoice(text) {
+    if (!handsFreeOn) return;
+    const msg = (text || "").trim();
+    listeningNow = false;
+    setListeningUi(false);
+    if (!msg) { scheduleRelisten(); return; }
+    if (busy) { scheduleRelisten(); return; } // não interrompe uma resposta em andamento
+    showTranscribed(msg);
+    send();
+  }
+
+  function stopWebRec() {
+    if (recSession) {
+      try { recSession.stop(); } catch (e) { /* ignore */ }
+      recSession = null;
+    }
+    listeningNow = false;
+    setListeningUi(false);
+  }
+
+  function startVoiceListen() {
+    if (!handsFreeOn) return;
+    if (IS_NATIVE) {
+      try {
+        window.AndroidBridge.startVoice();
+        listeningNow = true;
+        setListeningUi(true);
+      } catch (e) {
+        setHandsFreeOff();
+      }
       return;
     }
     if (!SR) {
-      alert("Reconhecimento de voz não suportado neste navegador. Use o Chrome no Android ou no desktop.");
+      alert("Reconhecimento de voz não suportado neste navegador. Use o Chrome no Android.");
+      setHandsFreeOff();
       return;
     }
+    stopWebRec();
     try {
-      recorder = new SR();
-      recorder.lang = (pickVoice() && pickVoice().lang) || "pt-BR";
-      recorder.interimResults = true;
-      recorder.continuous = true;
-      setRecording(true);
-      recorder.onresult = (e) => {
+      const rec = new SR();
+      recSession = rec;
+      rec.lang = (pickVoice() && pickVoice().lang) || "pt-BR";
+      rec.interimResults = true;
+      rec.continuous = false; // uma frase por sessão (a pausa ~2-3s encerra)
+      listeningNow = true;
+      setListeningUi(true);
+      rec.onresult = (e) => {
         let t = "";
-        for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
-        inputEl.value = t;
-        autoResize();
-      };
-      recorder.onend = () => setRecording(false);
-      recorder.onerror = (e) => {
-        setRecording(false);
-        if (e.error && e.error !== "aborted" && e.error !== "no-speech") {
-          alert("Erro no microfone: " + e.error);
+        let fin = false;
+        for (let i = 0; i < e.results.length; i++) {
+          t += e.results[i][0].transcript;
+          if (e.results[i].isFinal) fin = true;
+        }
+        if (fin) {
+          stopWebRec();
+          submitVoice(t);
+        } else {
+          showTranscribed(t);
         }
       };
-      recorder.start();
+      rec.onend = () => {
+        listeningNow = false;
+        setListeningUi(false);
+        if (recSession === rec) recSession = null;
+        if (handsFreeOn) scheduleRelisten();
+      };
+      rec.onerror = (e) => {
+        if (recSession === rec) recSession = null;
+        listeningNow = false;
+        setListeningUi(false);
+        if (e.error && e.error !== "aborted" && e.error !== "no-speech") {
+          toast("Erro no microfone: " + e.error, 1800);
+        }
+        if (handsFreeOn) scheduleRelisten();
+      };
+      rec.start();
     } catch (err) {
-      setRecording(false);
+      listeningNow = false;
+      setListeningUi(false);
       alert("Não foi possível iniciar o microfone: " + err.message);
+      setHandsFreeOff();
     }
+  }
+
+  function stopVoiceListen() {
+    if (IS_NATIVE) {
+      try { window.AndroidBridge.stopVoice(); } catch (e) { /* ignore */ }
+    } else {
+      stopWebRec();
+    }
+    listeningNow = false;
+    setListeningUi(false);
+  }
+
+  /* Reabre a escuta quando: ligado, sem resposta em andamento e voz parada. */
+  function scheduleRelisten() {
+    if (!handsFreeOn || listeningNow || busy) return;
+    clearInterval(relistenTimer);
+    let waited = 0;
+    relistenTimer = setInterval(() => {
+      waited += 250;
+      if (!handsFreeOn || listeningNow || busy) return;
+      if (waited > 60000 || !ttsIdle()) return;
+      clearInterval(relistenTimer);
+      relistenTimer = null;
+      startVoiceListen();
+    }, 250);
+  }
+
+  function setHandsFreeOn() {
+    handsFreeOn = true;
+    setMicState(true);
+    if (!ttsEnabled) { ttsToggle.checked = true; ttsEnabled = true; }
+    ttsStopAll();
+    startVoiceListen();
+  }
+
+  function setHandsFreeOff() {
+    handsFreeOn = false;
+    clearInterval(relistenTimer);
+    relistenTimer = null;
+    stopVoiceListen();
+    setMicState(false);
+    ttsStopAll();
+  }
+
+  micBtn.addEventListener("click", () => {
+    if (handsFreeOn) setHandsFreeOff();
+    else setHandsFreeOn();
   });
+
+  /* Callbacks nativos (Android -> JS). O Java só reporta; quem decide a
+   * re-escuta é este JS. */
+  window.onVoicePartial = (text) => {
+    if (handsFreeOn && listeningNow) showTranscribed(text);
+  };
+  window.onVoiceFinal = (text) => {
+    if (!handsFreeOn) return;
+    submitVoice(text);
+  };
+  window.onVoiceError = (msg) => {
+    if (!handsFreeOn) return;
+    listeningNow = false;
+    setListeningUi(false);
+    if ((msg || "").indexOf("permiss") !== -1 || msg === "sem-permissao" || (msg || "").indexOf("indispon") !== -1) {
+      toast("Não foi possível usar o microfone neste aparelho");
+      setHandsFreeOff();
+      return;
+    }
+    // Erros silenciosos (timeout, "não entendi") são normais na escuta contínua:
+    // evita spam de toast e apenas reabre a escuta.
+    const now = Date.now();
+    if (now - lastVoiceToastTs > 4500) {
+      lastVoiceToastTs = now;
+      toast("Microfone: " + msg, 1600);
+    }
+    scheduleRelisten();
+  };
 
   /* ---------------- Send / stream ---------------- */
   function autoResize() {
@@ -656,60 +757,6 @@
     }, () => {});
   }
 
-  async function groqNonStream(messages, maxTokens) {
-    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + NATIVE_CONFIG.apiKey,
-      },
-      body: JSON.stringify({
-        model: NATIVE_CONFIG.model,
-        messages: messages,
-        temperature: 0.7,
-        max_tokens: maxTokens || 300,
-        ...reasoningParam(NATIVE_CONFIG.model),
-      }),
-    });
-    if (!resp.ok) throw new Error("Erro da API Groq (HTTP " + resp.status + ")");
-    const j = await resp.json();
-    return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
-  }
-
-  async function enhanceImagePrompt(prompt, context) {
-    try {
-      const userContent = context
-        ? prompt +
-          "\n\nResultados de pesquisa na web sobre o assunto. Use-os APENAS se ajudarem " +
-          "a descrever o que o usuário pediu (ex.: aparência real de um personagem, objeto " +
-          "ou lugar). Ignore resultados irrelevantes:\n" +
-          context
-        : prompt;
-      const out = await groqNonStream([
-        {
-          role: "system",
-          content:
-            "You are an expert image prompt engineer. Convert the user's request into a " +
-            "detailed English prompt for an AI image generator. " +
-            "CRITICAL RULE: reproduce the user's scene EXACTLY. If the user says " +
-            "'one banana on a wooden table', the prompt MUST contain a realistic single " +
-            "banana resting on a real wooden table, with no other objects added and no " +
-            "fantastical reinterpretation. Never change the subject, never add creatures, " +
-            "never invent species, never replace the background object the user named. If " +
-            "web reference describes a real person/character/object, use those REAL details " +
-            "(hair, clothes, colors, props) so the image looks like the actual thing. " +
-            "Keep every element the user mentioned and only add generic style/quality words " +
-            "(photorealistic, natural lighting, sharp focus, high detail, professional " +
-            "photography). Reply ONLY with the English prompt, without quotes or extra text.",
-        },
-        { role: "user", content: userContent },
-      ], 400);
-      return out.trim() || prompt;
-    } catch (e) {
-      return prompt;
-    }
-  }
-
   function currentDateTime() {
     try {
       const d = new Date();
@@ -720,83 +767,6 @@
       );
     } catch (e) {
       return "";
-    }
-  }
-
-  function blobToDataURL(blob) {
-    return new Promise((resolve, reject) => {
-      const fr = new FileReader();
-      fr.onload = () => resolve(fr.result);
-      fr.onerror = reject;
-      fr.readAsDataURL(blob);
-    });
-  }
-
-  /* Chamada não-streaming com modelo de visão (para conferir a imagem gerada). */
-  async function groqVisionNonStream(text, dataUrl, maxTokens) {
-    const model = NATIVE_CONFIG.visionModel || "qwen/qwen3.6-27b";
-    const messages = [
-      { role: "system", content: "Você é um verificador de imagens geradas por IA. Responda apenas SIM ou NÃO." },
-      {
-        role: "user",
-        content: [
-          { type: "text", text },
-          { type: "image_url", image_url: { url: dataUrl } },
-        ],
-      },
-    ];
-    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + NATIVE_CONFIG.apiKey,
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: messages,
-        temperature: 0,
-        max_tokens: maxTokens || 50,
-        ...reasoningParam(model),
-      }),
-    });
-    if (!resp.ok) throw new Error("Erro da API Groq (HTTP " + resp.status + ")");
-    const j = await resp.json();
-    return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
-  }
-
-  /* Confere com visão se a imagem (já em dataUrl) corresponde ao pedido.
-   * Faz até 2 votos e aceita se qualquer um disser SIM (o modelo de visão é
-   * instável em binário). Em erro, aceita para não bloquear o fluxo. */
-  async function verifyImageData(prompt, dataUrl) {
-    try {
-      if (!NATIVE_CONFIG.visionModel || NATIVE_CONFIG.visionModel.toLowerCase() === "none") {
-        return true;
-      }
-      const vote = async () => {
-        const ans = await groqVisionNonStream(
-          'Diga SIM se a imagem mostra: "' + prompt + '". NÃO caso contrário. Responda somente SIM ou NÃO.',
-          dataUrl,
-          15
-        );
-        const a = (ans || "").trim().toLowerCase();
-        return a.indexOf("sim") === 0 || a.indexOf(" sim") !== -1 || a === "sim.";
-      };
-      return (await vote()) || (await vote());
-    } catch (e) {
-      return true;
-    }
-  }
-
-  async function verifyGeneratedImage(prompt, url) {
-    try {
-      const resp = await fetch(url);
-      if (!resp.ok) return false;
-      const blob = await resp.blob();
-      if (!blob || blob.size > 12_000_000) return true;
-      const dataUrl = await blobToDataURL(blob);
-      return await verifyImageData(prompt, dataUrl);
-    } catch (e) {
-      return true;
     }
   }
 
@@ -852,16 +822,6 @@
     return msgs;
   }
 
-  function slugify(s) {
-    return (s || "imagem")
-      .toLowerCase()
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 40) || "imagem";
-  }
-
   function trimHistory(arr, n) {
     if (!arr || arr.length <= n) return arr;
     return arr.slice(arr.length - n);
@@ -907,13 +867,25 @@
     if (!context) return messages;
     const hint =
       "Resultados de pesquisa na web sobre a pergunta do usuário. Se a pergunta exigir " +
-      "informação externa ou atual, responda APENAS com base nesses resultados. Se a " +
-      "resposta não estiver neles, diga claramente que não encontrou informação " +
-      "confiável. Cite as fontes (URLs) quando útil. Não invente dados, nomes, vídeos, " +
-      "canais nem URLs que não estejam nos resultados:";
+      "informação externa ou atual, responda APENAS com base nesses resultados. Use " +
+      "inclusive trechos parciais; se nenhum resultado responder de fato, diga " +
+      "claramente que não encontrou informação confiável. Cite as fontes (URLs) quando " +
+      "útil. Não invente dados, nomes, vídeos, canais nem URLs que não estejam nos " +
+      "resultados:";
     const msgs = messages.slice();
     msgs.splice(msgs.length - 1, 0, { role: "system", content: hint + "\n\n" + context });
     return msgs;
+  }
+
+  /* Evita gastar uma busca a cada mensagem: só busca quando a pergunta parece
+   * exigir informação externa/atual. Cumprimentos e falas curtas ("oi",
+   * "obrigado", "ok") respondem direto, sem esperar a web. */
+  function shouldAutoSearch(text) {
+    const t = (text || "").trim();
+    if (!t) return false;
+    if (t.length >= 22) return true;
+    if (/\b(quem|o que|qual|onde|quando|como|por que|porque|not[íi]cia|atual|resultado|pre[çc]o|valor|diferen[çc]a|melhor|existe|regras?)\b/i.test(t)) return true;
+    return /\?$/.test(t);
   }
 
   async function send() {
@@ -923,6 +895,7 @@
       if (streamAbort) streamAbort.abort();
       busy = false;
       updateSendBtn();
+      if (handsFreeOn) scheduleRelisten();
       return;
     }
     if (!text && !image) return;
@@ -954,7 +927,7 @@
         }
         const hasVision = !!(image && NATIVE_CONFIG.visionModel && NATIVE_CONFIG.visionModel.toLowerCase() !== "none");
         let searchContext = "";
-        if (text) {
+        if (text && shouldAutoSearch(text)) {
           searchContext = await nativeWebSearch(text);
         }
         const runTextOcr = () => groqStream(
@@ -994,7 +967,7 @@
         const resp = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history: trimHistory(history, 12), search: true }),
+          body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history: trimHistory(history, 12), search: shouldAutoSearch(text) }),
           signal: controller.signal,
         });
         if (!resp.ok || !resp.body) {
@@ -1046,6 +1019,7 @@
       streamAbort = null;
       updateSendBtn();
       inputEl.focus();
+      if (handsFreeOn) scheduleRelisten();
     }
   }
 
@@ -1057,126 +1031,6 @@
     }
   });
   inputEl.addEventListener("input", updateSendBtn);
-
-  /* ---------------- Image generation ---------------- */
-  let imageBusy = false;
-  /* Se o provider do HF rejeitar o modelo, pula o HF por 10min para não
-   * atrasar os próximos pedidos de imagem (fallback direto para Pollinations). */
-  let hfImageBlockedUntil = 0;
-
-  function setImageBusy(state) {
-    imageBusy = state;
-    imageBtn.classList.toggle("busy", state);
-    imageBtn.title = state ? "Gerando imagem..." : "Gerar imagem (use o texto digitado como prompt)";
-  }
-
-  imageBtn.addEventListener("click", generateImage);
-
-  async function generateImage() {
-    if (imageBusy) return;
-    let prompt = inputEl.value.trim();
-    if (!prompt) {
-      prompt = window.prompt("Descreva a imagem que deseja gerar:");
-    }
-    if (!prompt) return;
-    const welcome = document.getElementById("welcome");
-    if (welcome) welcome.remove();
-    resetComposer();
-
-    setImageBusy(true);
-    const assistant = addAssistantMessage();
-    assistant.bubble.innerHTML = `<span class="typing"><span></span><span></span><span></span></span> <span class="gen-label">Gerando imagem...</span>`;
-
-    try {
-      let url = "";
-      let dataUrl = "";
-      if (IS_NATIVE) {
-        if (!NATIVE_CONFIG.apiKey || NATIVE_CONFIG.apiKey === "CHAVE_NAO_CONFIGURADA") {
-          throw new Error("APK sem chave de API. Configure o secret GROQ_API_KEY no repositório e recompile.");
-        }
-        const searchRef = await nativeWebSearch(prompt);
-        const enhanced = await enhanceImagePrompt(prompt, searchRef);
-        // Primário: HuggingFace (texto-para-imagem)
-        if (NATIVE_CONFIG.hfToken && Date.now() >= hfImageBlockedUntil) {
-          try {
-            const hfModel = NATIVE_CONFIG.hfImageModel || "stabilityai/stable-diffusion-xl-base-1.0";
-            const hfResp = await fetch(
-              "https://router.huggingface.co/hf-inference/models/" + encodeURIComponent(hfModel),
-              {
-                method: "POST",
-                headers: {
-                  Authorization: "Bearer " + NATIVE_CONFIG.hfToken,
-                  "Content-Type": "application/json",
-                  Accept: "image/*",
-                },
-                body: JSON.stringify({
-                  inputs: enhanced,
-                  parameters: { width: 896, height: 1024, num_inference_steps: 30, guidance_scale: 7.5 },
-                }),
-              }
-            );
-            if (hfResp.ok) {
-              const blob = await hfResp.blob();
-              const d = await blobToDataURL(blob);
-              if (d && d.length > 1000) dataUrl = d;
-            } else if ([400, 401, 403, 404, 410].indexOf(hfResp.status) !== -1) {
-              hfImageBlockedUntil = Date.now() + 600000;
-            }
-          } catch (e) { /* cai para o fallback */ }
-        }
-        // Suporte: Pollinations (quando o HF falha ou não está configurado)
-        if (!dataUrl) {
-          const base = NATIVE_CONFIG.imageApi || "https://image.pollinations.ai/prompt/";
-          for (let attempt = 0; attempt < 3; attempt++) {
-            const seed = Math.floor(Math.random() * 999999) + 1;
-            url = `${base.replace(/\/+$/, "")}/${encodeURIComponent(enhanced)}?width=896&height=1024&seed=${seed}&nologo=true&model=flux&enhance=true`;
-            if (await verifyGeneratedImage(prompt, url)) break;
-          }
-        }
-      } else {
-        const resp = await fetch("/api/image", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt }),
-        });
-        let j = {};
-        try { j = await resp.json(); } catch (e) { /* ignore */ }
-        if (!resp.ok || (!j.url && !j.dataUrl)) throw new Error(j.error || "HTTP " + resp.status);
-        url = j.url || "";
-        dataUrl = j.dataUrl || "";
-      }
-
-      if (!url && !dataUrl) {
-        throw new Error("não foi possível gerar a imagem (sem HF e sem Pollinations)");
-      }
-      const displaySrc = dataUrl || url;
-      assistant.bubble.innerHTML = `
-        <div class="img-gen">
-          <div class="gen-loading"><span class="typing"><span></span><span></span><span></span></span> Aguardando a imagem...</div>
-          <img class="gen-img" src="${escapeHtml(displaySrc)}" alt="${escapeHtml(prompt)}" loading="lazy">
-          <div class="img-meta">${escapeHtml(prompt)}</div>
-        </div>`;
-      const img = assistant.bubble.querySelector(".gen-img");
-      img.onload = () => {
-        const ld = assistant.bubble.querySelector(".gen-loading");
-        if (ld) ld.remove();
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-      };
-      img.onerror = () => {
-        const ld = assistant.bubble.querySelector(".gen-loading");
-        if (ld) ld.remove();
-        assistant.bubble.classList.add("err-bubble");
-        assistant.bubble.innerHTML = `<span class="err-bubble">Não foi possível carregar a imagem gerada.</span>`;
-      };
-      assistant.raw = dataUrl ? `![${prompt}](imagem gerada)` : `![${prompt}](${url})`;
-      assistant.streaming = false;
-      addDownloadImageAction(assistant, displaySrc, "imagem-" + slugify(prompt) + ".jpg");
-    } catch (err) {
-      assistant.bubble.innerHTML = `<span class="err-bubble">Erro ao gerar imagem: ${escapeHtml(err.message)}</span>`;
-    } finally {
-      setImageBusy(false);
-    }
-  }
 
   /* ---------------- Suggestions & new chat ---------------- */
   document.addEventListener("click", (e) => {
