@@ -46,6 +46,13 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+          GROQ_VISION_MODEL: ${{ secrets.GROQ_VISION_MODEL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ secrets.OPENROUTER_MODEL }}
+          IMAGE_API_URL: ${{ secrets.IMAGE_API_URL }}
+          IMAGE_MODEL: ${{ secrets.IMAGE_MODEL }}
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
