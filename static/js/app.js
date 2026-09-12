@@ -13,6 +13,8 @@
   const ttsToggle = document.getElementById("ttsToggle");
   const voiceSelect = document.getElementById("voiceSelect");
   const rateSelect = document.getElementById("rateSelect");
+  const providerSelect = document.getElementById("providerSelect");
+  const genImgBtn = document.getElementById("genImgBtn");
 
   let history = [];
   let attachedImage = null; // { dataUrl, name }
@@ -26,7 +28,15 @@
     apiKey: "",
     model: "openai/gpt-oss-120b",
     visionModel: "qwen/qwen3.6-27b",
+    geminiKey: "",
+    geminiModel: "gemini-2.0-flash",
+    openrouterKey: "",
+    openrouterModel: "meta-llama/llama-3.3-70b-instruct:free",
+    imageApiUrl: "https://image.pollinations.ai/prompt/",
+    imageModel: "flux",
+    providers: [],
   };
+  const PROVIDER_LABEL = { auto: "Auto", groq: "Groq", gemini: "Gemini", openrouter: "OpenRouter" };
 
   if (IS_NATIVE) {
     try {
@@ -35,9 +45,58 @@
     } catch (e) { /* ignore */ }
     fetch("config.json")
       .then((r) => r.json())
-      .then((c) => { NATIVE_CONFIG = Object.assign({}, NATIVE_CONFIG, c); })
-      .catch(() => {});
+      .then((c) => {
+        NATIVE_CONFIG = Object.assign({}, NATIVE_CONFIG, c);
+        fillProviders(nativeProviderList());
+      })
+      .catch(() => fillProviders(nativeProviderList()));
     voiceSelect.style.display = "none";
+    fillProviders(nativeProviderList());
+  } else {
+    fetch("/api/health")
+      .then((r) => r.json())
+      .then((h) => fillProviders(h.providers || []))
+      .catch(() => fillProviders(["groq"]));
+  }
+
+  function nativeProviderList() {
+    const list = [];
+    if (NATIVE_CONFIG.apiKey && NATIVE_CONFIG.apiKey !== "CHAVE_NAO_CONFIGURADA") list.push("groq");
+    if (NATIVE_CONFIG.geminiKey) list.push("gemini");
+    if (NATIVE_CONFIG.openrouterKey) list.push("openrouter");
+    return list;
+  }
+
+  function fillProviders(list) {
+    if (!providerSelect) return;
+    const cur = providerSelect.value || "auto";
+    providerSelect.innerHTML = "";
+    const opts = ["auto"].concat((list || []).filter((p) => p && p !== "auto"));
+    opts.forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p;
+      opt.textContent = PROVIDER_LABEL[p] || p;
+      providerSelect.appendChild(opt);
+    });
+    providerSelect.value = opts.indexOf(cur) >= 0 ? cur : "auto";
+  }
+
+  function chosenProvider() {
+    return (providerSelect && providerSelect.value) || "auto";
+  }
+
+  function nativeHasKey(name) {
+    if (name === "groq") return !!(NATIVE_CONFIG.apiKey && NATIVE_CONFIG.apiKey !== "CHAVE_NAO_CONFIGURADA");
+    if (name === "gemini") return !!NATIVE_CONFIG.geminiKey;
+    if (name === "openrouter") return !!NATIVE_CONFIG.openrouterKey;
+    return false;
+  }
+
+  function nativeOrder(requested) {
+    const have = nativeProviderList();
+    const req = (requested || "auto").toLowerCase();
+    if (req !== "auto" && have.indexOf(req) >= 0) return [req].concat(have.filter((p) => p !== req));
+    return have;
   }
 
   /* ---------------- Toast ---------------- */
@@ -75,6 +134,7 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
   function finalizeBubble(assistant) {
+    if (assistant.imageGen) return;
     if (assistant.renderTimer) {
       clearTimeout(assistant.renderTimer);
       assistant.renderTimer = null;
@@ -731,30 +791,87 @@
     return {};
   }
 
-  async function groqStream(model, messages, controller, onLine, maxTokens) {
-    const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+  async function openaiCompatStream(url, apiKey, model, messages, controller, onLine, maxTokens, extraHeaders, extraBody) {
+    const headers = Object.assign({
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + apiKey,
+    }, extraHeaders || {});
+    const body = Object.assign({
+      model: model,
+      messages: messages,
+      stream: true,
+      temperature: 0.7,
+      max_tokens: maxTokens || 1500,
+    }, extraBody || {});
+    const resp = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + NATIVE_CONFIG.apiKey,
-      },
-      body: JSON.stringify({
-        model: model,
-        messages: messages,
-        stream: true,
-        temperature: 0.7,
-        max_tokens: maxTokens || 1500,
-        ...reasoningParam(model),
-      }),
+      headers: headers,
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
     if (!resp.ok || !resp.body) {
-      throw new Error("Erro da API Groq (HTTP " + resp.status + ")");
+      throw new Error("Erro da API (HTTP " + resp.status + ")");
     }
     await consumeStream(resp.body, (raw) => {
       const c = parseDelta(raw);
       if (c) onLine(c);
     }, () => {});
+  }
+
+  async function groqStream(model, messages, controller, onLine, maxTokens) {
+    await openaiCompatStream(
+      "https://api.groq.com/openai/v1/chat/completions",
+      NATIVE_CONFIG.apiKey,
+      model,
+      messages,
+      controller,
+      onLine,
+      maxTokens,
+      null,
+      reasoningParam(model)
+    );
+  }
+
+  async function geminiStream(model, messages, controller, onLine, maxTokens) {
+    await openaiCompatStream(
+      "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+      NATIVE_CONFIG.geminiKey,
+      model || "gemini-2.0-flash",
+      messages,
+      controller,
+      onLine,
+      maxTokens
+    );
+  }
+
+  async function openrouterStream(model, messages, controller, onLine, maxTokens) {
+    await openaiCompatStream(
+      "https://openrouter.ai/api/v1/chat/completions",
+      NATIVE_CONFIG.openrouterKey,
+      model || "meta-llama/llama-3.3-70b-instruct:free",
+      messages,
+      controller,
+      onLine,
+      maxTokens,
+      { "HTTP-Referer": "https://github.com/jt168304-sys/ia-assistente", "X-Title": "YuIA" }
+    );
+  }
+
+  async function nativeChatStream(provider, messages, controller, onLine, vision) {
+    if (provider === "groq") {
+      const model = vision && NATIVE_CONFIG.visionModel && NATIVE_CONFIG.visionModel.toLowerCase() !== "none"
+        ? NATIVE_CONFIG.visionModel
+        : NATIVE_CONFIG.model;
+      await groqStream(model, messages, controller, onLine);
+      return;
+    }
+    if (provider === "gemini") {
+      await geminiStream(NATIVE_CONFIG.geminiModel, messages, controller, onLine);
+      return;
+    }
+    if (provider === "openrouter") {
+      await openrouterStream(NATIVE_CONFIG.openrouterModel, messages, controller, onLine);
+    }
   }
 
   function currentDateTime() {
@@ -793,7 +910,8 @@
         "Formate respostas com Markdown quando fizer sentido. Prefira hífens (-) em listas " +
         "em vez de asteriscos, e evite asteriscos de ênfase (*texto*) para que a narração " +
         "por voz saia limpa. Quando o usuário pedir para criar um arquivo, entregue o " +
-        "conteúdo completo dentro de um bloco de código.",
+        "conteúdo completo dentro de um bloco de código. Recuse apenas pedidos claramente " +
+        "ilegais (crime, exploração de menores, armas, ataques).",
     }, ...trimHistory(history, 12)];
     let content = text || "Analise o conteúdo desta imagem e descreva o que você enxerga.";
     if (ocrText) content += "\n\nTexto extraído da imagem (OCR):\n" + ocrText;
@@ -883,9 +1001,126 @@
   function shouldAutoSearch(text) {
     const t = (text || "").trim();
     if (!t) return false;
+    if (looksLikeImageRequest(t)) return false;
     if (t.length >= 22) return true;
-    if (/\b(quem|o que|qual|onde|quando|como|por que|porque|not[íi]cia|atual|resultado|pre[çc]o|valor|diferen[çc]a|melhor|existe|regras?)\b/i.test(t)) return true;
+    if (/\b(quem|o que|qual|onde|quando|como|por que|porque|not[íi]cia|atual|resultado|pre[çc]o|valor|diferen[çc]a|melhor|existe|regras?|hoje|agora)\b/i.test(t)) return true;
     return /\?$/.test(t);
+  }
+
+  function looksLikeImageRequest(text) {
+    const t = (text || "").trim().toLowerCase();
+    if (!t) return false;
+    return /\b(gere|gerar|gera|crie|criar|desenhe|desenhar|pinte|pintar|ilustre|ilustrar)\b.{0,40}\b(imagem|foto|desenho|ilustra|picture|image)\b/.test(t)
+      || /\b(imagem|foto|desenho) de\b/.test(t)
+      || /\bgenerate (an |a )?image\b/.test(t);
+  }
+
+  function imageApiBase() {
+    const base = (NATIVE_CONFIG.imageApiUrl || "https://image.pollinations.ai/prompt/").replace(/\/?$/, "/");
+    return base;
+  }
+
+  function pollinationsUrl(prompt) {
+    const model = NATIVE_CONFIG.imageModel || "flux";
+    const seed = Math.floor(Math.random() * 999999) + 1;
+    return imageApiBase() + encodeURIComponent(prompt)
+      + "?model=" + encodeURIComponent(model)
+      + "&width=1024&height=1024&nologo=true&enhance=true&seed=" + seed;
+  }
+
+  async function refineImagePrompt(subject, refs) {
+    const msgs = [
+      {
+        role: "system",
+        content: "You write image-generation prompts. Reply with ONE English prompt only, no quotes, no markdown. Describe subject, style, composition, lighting. Avoid extra limbs and warped faces. Under 80 words.",
+      },
+      {
+        role: "user",
+        content: "Subject: " + subject + (refs ? "\nWeb refs:\n" + refs.slice(0, 900) : ""),
+      },
+    ];
+    let out = "";
+    const controller = new AbortController();
+    const order = nativeOrder("auto");
+    for (let i = 0; i < order.length; i++) {
+      try {
+        await nativeChatStream(order[i], msgs, controller, (c) => { out += c; }, false);
+        break;
+      } catch (e) { /* try next */ }
+    }
+    out = (out || "").replace(/^['"`]+|['"`]+$/g, "").trim();
+    if (out.length > 12) return out;
+    return subject + ", highly detailed, sharp focus, coherent anatomy, natural lighting, professional digital art, 8k";
+  }
+
+  function renderGeneratedImage(assistant, imgUrl, caption) {
+    const img = document.createElement("img");
+    img.className = "generated";
+    img.alt = "imagem gerada";
+    img.src = imgUrl;
+    img.addEventListener("error", () => {
+      toast("Falha ao carregar a imagem gerada");
+    });
+    assistant.bubble.innerHTML = "";
+    assistant.bubble.appendChild(img);
+    if (caption) {
+      const p = document.createElement("p");
+      p.className = "gen-caption";
+      p.textContent = caption;
+      assistant.bubble.appendChild(p);
+    }
+    const dl = document.createElement("button");
+    dl.className = "code-dl";
+    dl.textContent = "Baixar imagem";
+    dl.addEventListener("click", () => {
+      if (IS_NATIVE) {
+        try {
+          window.AndroidBridge.saveImage(imgUrl, "yuia-" + Date.now() + ".jpg");
+          toast("Salvando imagem");
+        } catch (e) {
+          toast("Falha ao salvar imagem");
+        }
+      } else {
+        const a = document.createElement("a");
+        a.href = imgUrl;
+        a.download = "yuia-imagem.jpg";
+        a.target = "_blank";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+    });
+    assistant.bubble.appendChild(dl);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  async function generateImageFlow(text, assistant, controller) {
+    const subject = text.replace(/^(por favor[, ]*)?(pode |consegue )?(me )?(gere|gerar|gera|crie|criar|desenhe|desenhar|pinte|ilustre)\s+(uma |um )?(imagem|foto|desenho|ilustração)?\s*(de |do |da |com )?/i, "").trim() || text;
+    if (IS_NATIVE) {
+      let refs = "";
+      try { refs = await nativeWebSearch(subject + " visual description"); } catch (e) { refs = ""; }
+      const refined = await refineImagePrompt(subject, refs);
+      const url = pollinationsUrl(refined);
+      renderGeneratedImage(assistant, url, "Prompt: " + refined);
+      assistant.raw = "Imagem gerada: " + refined;
+      assistant.displayLen = assistant.raw.length;
+      assistant.imageGen = true;
+      return;
+    }
+    const resp = await fetch("/api/image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: text }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) throw new Error("Falha ao gerar imagem (HTTP " + resp.status + ")");
+    const data = await resp.json();
+    const src = data.data_url || data.url;
+    if (!src) throw new Error("O serviço de imagem não devolveu resultado");
+    renderGeneratedImage(assistant, src, data.prompt ? ("Prompt: " + data.prompt) : "");
+    assistant.raw = "Imagem gerada: " + (data.prompt || text);
+    assistant.displayLen = assistant.raw.length;
+    assistant.imageGen = true;
   }
 
   async function send() {
@@ -916,9 +1151,12 @@
 
     try {
       if (IS_NATIVE) {
-        if (!NATIVE_CONFIG.apiKey || NATIVE_CONFIG.apiKey === "CHAVE_NAO_CONFIGURADA") {
-          throw new Error("APK sem chave de API. Configure o secret GROQ_API_KEY no repositório e recompile.");
+        if (!nativeProviderList().length) {
+          throw new Error("APK sem chave de API. Configure GROQ_API_KEY e/ou GEMINI_API_KEY nos secrets e recompile.");
         }
+        if (text && !image && looksLikeImageRequest(text)) {
+          await generateImageFlow(text, assistant, controller);
+        } else {
         if (nativeOcrPending) {
           const t0 = Date.now();
           while (nativeOcrPending && Date.now() - t0 < 20000) {
@@ -930,20 +1168,30 @@
         if (text && shouldAutoSearch(text)) {
           searchContext = await nativeWebSearch(text);
         }
-        const runTextOcr = () => groqStream(
-          NATIVE_CONFIG.model,
-          injectSearchContext(nativeGroqMessages(text, image, nativeOcrResult), searchContext),
-          controller,
-          (c) => applyDelta(assistant, c)
-        );
+        const order = nativeOrder(chosenProvider());
+        const runTextOcr = async () => {
+          const msgs = injectSearchContext(nativeGroqMessages(text, image, nativeOcrResult), searchContext);
+          let lastErr = null;
+          for (let i = 0; i < order.length; i++) {
+            try {
+              await nativeChatStream(order[i], msgs, controller, (c) => applyDelta(assistant, c), false);
+              return;
+            } catch (e) { lastErr = e; }
+          }
+          if (lastErr) throw lastErr;
+        };
         try {
           if (hasVision) {
-            await groqStream(
-              NATIVE_CONFIG.visionModel,
-              injectSearchContext(nativeVisionMessages(text, image.dataUrl, nativeOcrResult), searchContext),
-              controller,
-              (c) => applyDelta(assistant, c)
-            );
+            const vMsgs = injectSearchContext(nativeVisionMessages(text, image.dataUrl, nativeOcrResult), searchContext);
+            try {
+              await nativeChatStream("groq", vMsgs, controller, (c) => applyDelta(assistant, c), true);
+            } catch (e) {
+              if (nativeHasKey("gemini")) {
+                await nativeChatStream("gemini", vMsgs, controller, (c) => applyDelta(assistant, c), true);
+              } else {
+                throw e;
+              }
+            }
             if ((!assistant.raw || !assistant.raw.trim()) && nativeOcrResult) {
               assistant.raw = "";
               assistant.displayLen = 0;
@@ -963,11 +1211,15 @@
             throw visionErr;
           }
         }
+        }
       } else {
+        if (text && !image && looksLikeImageRequest(text)) {
+          await generateImageFlow(text, assistant, controller);
+        } else {
         const resp = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history: trimHistory(history, 12), search: shouldAutoSearch(text) }),
+          body: JSON.stringify({ message: text, image: image ? image.dataUrl : null, history: trimHistory(history, 12), search: shouldAutoSearch(text), provider: chosenProvider() }),
           signal: controller.signal,
         });
         if (!resp.ok || !resp.body) {
@@ -986,21 +1238,34 @@
           },
           () => {}
         );
+        }
       }
-      if (!assistant.raw || !assistant.raw.trim()) {
+      if (assistant.imageGen) {
+        assistant.streaming = false;
+        if (assistant.raw) history.push({ role: "assistant", content: stripThink(assistant.raw) });
+      } else if (!assistant.raw || !assistant.raw.trim()) {
         assistant.raw =
           "Não consegui gerar uma resposta agora. Tente reformular a pergunta ou verifique a conexão.";
         assistant.displayLen = 0;
         setBubbleHTML(assistant, assistant.raw);
-      }
-      if (sentenceBuffer.text.trim()) {
-        ttsSpeak(sentenceBuffer.text.trim());
-        sentenceBuffer.text = "";
-      }
-      finalizeBubble(assistant);
-      assistant.streaming = false;
-      attachActions(assistant);
+        if (sentenceBuffer.text.trim()) {
+          ttsSpeak(sentenceBuffer.text.trim());
+          sentenceBuffer.text = "";
+        }
+        finalizeBubble(assistant);
+        assistant.streaming = false;
+        attachActions(assistant);
         if (assistant.raw) history.push({ role: "assistant", content: stripThink(assistant.raw) });
+      } else if (!assistant.imageGen) {
+        if (sentenceBuffer.text.trim()) {
+          ttsSpeak(sentenceBuffer.text.trim());
+          sentenceBuffer.text = "";
+        }
+        finalizeBubble(assistant);
+        assistant.streaming = false;
+        attachActions(assistant);
+        if (assistant.raw) history.push({ role: "assistant", content: stripThink(assistant.raw) });
+      }
     } catch (err) {
       if (err.name === "AbortError") {
         if (sentenceBuffer.text.trim()) { ttsSpeak(sentenceBuffer.text.trim()); sentenceBuffer.text = ""; }
@@ -1021,6 +1286,22 @@
       inputEl.focus();
       if (handsFreeOn) scheduleRelisten();
     }
+  }
+
+  if (genImgBtn) {
+    genImgBtn.addEventListener("click", () => {
+      const t = inputEl.value.trim();
+      if (!t) {
+        toast("Digite o que deseja gerar e toque na paleta");
+        inputEl.focus();
+        return;
+      }
+      if (!looksLikeImageRequest(t)) {
+        inputEl.value = "Gere uma imagem de " + t;
+        autoResize();
+      }
+      send();
+    });
   }
 
   sendBtn.addEventListener("click", send);
@@ -1058,7 +1339,7 @@
         <button class="chip" data-q="Resuma em 3 tópicos as principais vantagens de aprender Python.">Aprender Python</button>
         <button class="chip" data-q="Escreva uma função em Python que retorna o n-ésimo termo de Fibonacci.">Código Python</button>
         <button class="chip" data-q="Crie um arquivo CSV com um plano de estudos semanal.">Criar arquivo CSV</button>
-        <button class="chip" data-q="Explique o que é machine learning de forma simples.">Machine learning</button>
+        <button class="chip" data-q="Gere uma imagem de um gato astronauta no espaço, estilo digital art.">Gerar imagem</button>
       </div>`;
     messagesEl.appendChild(welcome);
     resetComposer();

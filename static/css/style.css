@@ -204,7 +204,10 @@ body {
 }
 
 .bubble img.attached { max-width: 220px; max-height: 220px; border-radius: 10px; display: block; margin-bottom: 8px; border: 1px solid var(--border-2); }
+.bubble img.generated { max-width: min(420px, 100%); border-radius: 12px; display: block; margin: 8px 0; border: 1px solid var(--border-2); }
+.gen-caption { font-size: .78rem; color: var(--text-dim); margin-top: 6px; }
 .bubble .ocr-tag { display: inline-block; font-size: .68rem; color: var(--blue-3); background: var(--grad-soft); padding: 2px 8px; border-radius: 999px; margin-bottom: 6px; }
+.icon-btn.active { color: var(--blue-3); background: var(--grad-soft); }
 
 .bubble pre {
   background: #070b16;

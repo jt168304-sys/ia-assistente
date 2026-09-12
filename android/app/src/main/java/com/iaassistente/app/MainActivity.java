@@ -257,6 +257,20 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             }).start();
         }
 
+        @JavascriptInterface
+        public void saveImage(final String url, final String filename) {
+            new Thread(() -> {
+                String path = saveImageFile(url, filename);
+                runOnUiThread(() -> {
+                    if (path != null) {
+                        Toast.makeText(MainActivity.this, "Imagem salva: " + path, Toast.LENGTH_LONG).show();
+                    } else {
+                        Toast.makeText(MainActivity.this, "Falha ao salvar imagem", Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }).start();
+        }
+
         /* Pesquisa na web gratuita (DuckDuckGo) — sem chave e sem cartão.
          * Versão ASSÍNCRONA: roda em thread própria e devolve o resultado via
          * callback JS (onWebSearchResult), para não travar o thread de JS do
@@ -292,15 +306,25 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             }
             if (results.size() < 3) {
                 try {
-                    Set<String> seen = new HashSet<>();
-                    for (Map<String, String> r : results) seen.add(r.get("url"));
-                    for (Map<String, String> w : parseSearchJson(wikipediaSearch(q))) {
-                        String u = w.get("url");
-                        if (u != null && !u.isEmpty() && !seen.contains(u) && results.size() < 5) {
-                            results.add(w);
-                            seen.add(u);
-                        }
-                    }
+                    mergeSearch(results, parseSearchJson(ddgInstant(q)), 5);
+                } catch (Exception ignored) {
+                }
+            }
+            if (results.size() < 3) {
+                try {
+                    mergeSearch(results, parseSearchJson(ddgLite(q)), 5);
+                } catch (Exception ignored) {
+                }
+            }
+            if (results.size() < 3) {
+                try {
+                    mergeSearch(results, parseSearchJson(wikipediaSearch(q, "pt")), 5);
+                } catch (Exception ignored) {
+                }
+            }
+            if (results.size() < 3) {
+                try {
+                    mergeSearch(results, parseSearchJson(wikipediaSearch(q, "en")), 5);
                 } catch (Exception ignored) {
                 }
             }
@@ -384,10 +408,97 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         }
     }
 
-    /* Wikipedia (pt): confiável sem chave, usado quando o DuckDuckGo falha.
+    private void mergeSearch(List<Map<String, String>> results, List<Map<String, String>> extra, int max) {
+        Set<String> seen = new HashSet<>();
+        for (Map<String, String> r : results) {
+            String u = r.get("url");
+            if (u != null) seen.add(u);
+        }
+        for (Map<String, String> w : extra) {
+            String u = w.get("url");
+            if (u != null && !u.isEmpty() && !seen.contains(u) && results.size() < max) {
+                results.add(w);
+                seen.add(u);
+            }
+        }
+    }
+
+    private String ddgInstant(String query) throws Exception {
+        String urlStr = "https://api.duckduckgo.com/?q=" + URLEncoder.encode(query, "UTF-8")
+                + "&format=json&no_html=1&skip_disambig=1";
+        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
+        conn.setRequestProperty("Accept", "application/json");
+        conn.setConnectTimeout(8000);
+        conn.setReadTimeout(8000);
+        String body = readConnection(conn);
+        JSONObject root = new JSONObject(body);
+        StringBuilder out = new StringBuilder("[");
+        int count = 0;
+        String abstractText = root.optString("AbstractText", "").trim();
+        String absUrl = root.optString("AbstractURL", "");
+        String heading = root.optString("Heading", "DuckDuckGo");
+        if (!abstractText.isEmpty()) {
+            out.append("{\"title\":").append(jsonString(heading))
+                    .append(",\"url\":").append(jsonString(absUrl))
+                    .append(",\"snippet\":").append(jsonString(abstractText)).append("}");
+            count++;
+        }
+        JSONArray related = root.optJSONArray("RelatedTopics");
+        if (related != null) {
+            for (int i = 0; i < related.length() && count < 5; i++) {
+                JSONObject item = related.optJSONObject(i);
+                if (item == null || item.has("Topics")) continue;
+                String text = item.optString("Text", "").trim();
+                String href = item.optString("FirstURL", "");
+                if (text.isEmpty()) continue;
+                if (count > 0) out.append(",");
+                String title = text.contains(" - ") ? text.substring(0, text.indexOf(" - ")) : text;
+                if (title.length() > 80) title = title.substring(0, 80);
+                out.append("{\"title\":").append(jsonString(title))
+                        .append(",\"url\":").append(jsonString(href))
+                        .append(",\"snippet\":").append(jsonString(text)).append("}");
+                count++;
+            }
+        }
+        out.append("]");
+        return out.toString();
+    }
+
+    private String ddgLite(String query) throws Exception {
+        String urlStr = "https://lite.duckduckgo.com/lite/?q=" + URLEncoder.encode(query, "UTF-8");
+        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
+        conn.setRequestMethod("GET");
+        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
+        conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,*/*;q=0.8");
+        conn.setConnectTimeout(8000);
+        conn.setReadTimeout(8000);
+        String html = readConnection(conn);
+        Pattern linkPat = Pattern.compile("<a[^>]+href=\"(https?://[^\"]+)\"[^>]*>(.*?)</a>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+        Matcher lm = linkPat.matcher(html);
+        StringBuilder out = new StringBuilder("[");
+        int count = 0;
+        while (lm.find() && count < 5) {
+            String href = lm.group(1);
+            if (href.contains("duckduckgo.com")) continue;
+            String title = stripHtml(lm.group(2));
+            if (title.length() < 3) continue;
+            if (count > 0) out.append(",");
+            out.append("{\"title\":").append(jsonString(title))
+                    .append(",\"url\":").append(jsonString(href))
+                    .append(",\"snippet\":\"\"}");
+            count++;
+        }
+        out.append("]");
+        return out.toString();
+    }
+
+    /* Wikipedia: confiável sem chave, usado quando o DuckDuckGo falha.
      * Retorna o mesmo formato [{"title","url","snippet"}] do DDG. */
-    private String wikipediaSearch(String query) throws Exception {
-        String urlStr = "https://pt.wikipedia.org/w/api.php?action=query&list=search&srsearch="
+    private String wikipediaSearch(String query, String lang) throws Exception {
+        String host = "en".equals(lang) ? "en.wikipedia.org" : "pt.wikipedia.org";
+        String urlStr = "https://" + host + "/w/api.php?action=query&list=search&srsearch="
                 + URLEncoder.encode(query, "UTF-8") + "&srlimit=5&format=json";
         HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
         conn.setRequestMethod("GET");
@@ -397,15 +508,16 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         conn.setReadTimeout(6000);
         String body = readConnection(conn);
         JSONObject root = new JSONObject(body);
-        JSONArray search = root.optJSONObject("query").optJSONArray("search");
+        JSONObject queryObj = root.optJSONObject("query");
+        JSONArray search = queryObj == null ? null : queryObj.optJSONArray("search");
         StringBuilder out = new StringBuilder("[");
         if (search != null) {
             for (int i = 0; i < search.length(); i++) {
                 JSONObject r = search.getJSONObject(i);
                 String title = r.optString("title", "");
                 String snippet = stripHtml(r.optString("snippet", ""));
-                String url = "https://pt.wikipedia.org/wiki/"
-                        + URLEncoder.encode(title.replace(' ', '_'), "UTF-8");
+                String url = "https://" + host + "/wiki/"
+                        + URLEncoder.encode(title.replace(' ', '_'), "UTF-8").replace("+", "_");
                 if (i > 0) out.append(",");
                 out.append("{\"title\":").append(jsonString(title))
                    .append(",\"url\":").append(jsonString(url))
@@ -506,6 +618,56 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             return bos.toString("UTF-8");
         } catch (Exception e) {
             return "{}";
+        }
+    }
+
+    private String saveImageFile(String url, String filename) {
+        String safeName = sanitizeFilename(filename == null || filename.isEmpty() ? "yuia.jpg" : filename);
+        try {
+            byte[] bytes;
+            if (url != null && url.startsWith("data:")) {
+                int comma = url.indexOf(',');
+                if (comma < 0) return null;
+                bytes = android.util.Base64.decode(url.substring(comma + 1), android.util.Base64.DEFAULT);
+            } else {
+                HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0");
+                conn.setConnectTimeout(20000);
+                conn.setReadTimeout(60000);
+                InputStream is = conn.getInputStream();
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = is.read(buf)) != -1) bos.write(buf, 0, n);
+                is.close();
+                conn.disconnect();
+                bytes = bos.toByteArray();
+            }
+            if (bytes == null || bytes.length < 32) return null;
+            String mime = "image/jpeg";
+            if (safeName.endsWith(".png")) mime = "image/png";
+            else if (safeName.endsWith(".webp")) mime = "image/webp";
+            if (Build.VERSION.SDK_INT >= 29) {
+                android.content.ContentValues values = new android.content.ContentValues();
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, safeName);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/IAAssistente");
+                Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+                if (uri == null) return null;
+                try (FileOutputStream fos = (FileOutputStream) getContentResolver().openOutputStream(uri)) {
+                    if (fos != null) fos.write(bytes);
+                }
+                return "Downloads/IAAssistente/" + safeName;
+            }
+            File dir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "IAAssistente");
+            if (!dir.exists()) dir.mkdirs();
+            File f = new File(dir, safeName);
+            try (FileOutputStream fos = new FileOutputStream(f)) {
+                fos.write(bytes);
+            }
+            return f.getAbsolutePath();
+        } catch (Exception e) {
+            return null;
         }
     }
 

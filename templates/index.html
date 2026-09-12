@@ -20,11 +20,14 @@
       </div>
       <div class="brand-text">
         <span class="brand-title">YuIA</span>
-        <span class="brand-sub" id="brandSub">Voz, busca na web e arquivos</span>
+        <span class="brand-sub" id="brandSub">Voz, busca, imagens e arquivos</span>
       </div>
     </div>
 
     <div class="controls">
+      <select id="providerSelect" class="select" title="Provedor de IA">
+        <option value="auto">Auto</option>
+      </select>
       <button id="newChatBtn" class="btn-ghost" title="Novo chat">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
           <path d="M12 5v14M5 12h14"/>
@@ -57,12 +60,12 @@
         </svg>
       </div>
       <h1>Como posso ajudar?</h1>
-      <p class="welcome-sub">Envie mensagens, anexe fotos para leitura inteligente, crie arquivos e ouça as respostas em voz alta. Toque no microfone para conversar por voz.</p>
+      <p class="welcome-sub">Envie mensagens, anexe fotos, gere imagens, crie arquivos e ouça as respostas em voz alta. Toque no microfone para conversar por voz.</p>
       <div class="suggestions" id="suggestions">
         <button class="chip" data-q="Resuma em 3 tópicos as principais vantagens de aprender Python.">Aprender Python</button>
         <button class="chip" data-q="Escreva uma função em Python que retorna o n-ésimo termo de Fibonacci.">Código Python</button>
-        <button class="chip" data-q="Explique o que é machine learning de forma simples.">Machine learning</button>
-        <button class="chip" data-q="Crie um roteiro de estudos de 4 semanas para front-end.">Roteiro de estudos</button>
+        <button class="chip" data-q="Crie um arquivo CSV com um plano de estudos semanal.">Criar arquivo CSV</button>
+        <button class="chip" data-q="Gere uma imagem de um gato astronauta no espaço, estilo digital art.">Gerar imagem</button>
       </div>
     </div>
   </main>
@@ -70,6 +73,16 @@
   <footer class="composer">
     <div id="imagePreview" class="image-preview"></div>
     <div class="composer-bar">
+      <button id="genImgBtn" class="icon-btn" title="Gerar imagem a partir do texto">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="13.5" cy="6.5" r="2.5"/>
+          <circle cx="17.5" cy="10.5" r="2.5"/>
+          <circle cx="8.5" cy="7.5" r="2.5"/>
+          <circle cx="6.5" cy="12.5" r="2.5"/>
+          <path d="M12 22v-5"/>
+          <path d="M9 14.5c.5 2 2 3.5 3 3.5s2.5-1.5 3-3.5"/>
+        </svg>
+      </button>
       <button id="attachBtn" class="icon-btn" title="Anexar imagem (leitura inteligente)">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="3" y="3" width="18" height="18" rx="2"/>
@@ -91,7 +104,7 @@
         </svg>
       </button>
     </div>
-    <p class="composer-hint">A IA pode cometer erros. Toque no microfone para conversar por voz (mãos-livres) ou peça para criar arquivos.</p>
+    <p class="composer-hint">A IA pode cometer erros. Use a paleta para gerar imagens, o clipe para anexar fotos, ou peça arquivos em texto.</p>
   </footer>
 
   <input type="file" id="fileInput" accept="image/*" hidden>
